@@ -238,6 +238,12 @@ void main(){{
         glUseProgram(self.prog)
         glBindVertexArray(self.vao)
         glDrawArrays(GL_TRIANGLES, 0, 3)
+        # ponytail: readback to host, ~19ms at 4K -- it dominates a chain whose
+        # other stages are 2.9ms upload and 0.4ms shader. Reading RGB is 8x
+        # faster but the CPU pad back to 4 channels gives it all back, so there
+        # is no win on this side of the bus. Upgrade to GL->CUDA interop feeding
+        # NVENC a device pointer when 4K playback needs headroom; unnecessary
+        # for the 200ms slider budget.
         buf = glReadPixels(0, 0, self.w, self.h, GL_BGRA, GL_UNSIGNED_BYTE)
         return np.frombuffer(buf, np.uint8).reshape(self.h, self.w, 4)
 

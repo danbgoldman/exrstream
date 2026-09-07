@@ -6,8 +6,8 @@ exposure actually painted on the viewer's canvas.
 Deliberately single-threaded. The whole server-side chain is 2.6ms at 2K, so
 blocking the event loop with it costs ~6% of a 24fps frame interval and buys us
 no GL context/thread affinity problems.
-  ponytail: one session at a time, one GL context on the main thread. Per-session
-  render threads (each with its own eglMakeCurrent) only when >1 viewer matters.
+  NOT debt: superseded by exrstream/server.py, which carries the live version
+  of this ceiling as a marked shortcut. Kept as the Phase 0 record.
 """
 import asyncio, struct, sys, time
 from pathlib import Path

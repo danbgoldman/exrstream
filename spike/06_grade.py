@@ -92,8 +92,9 @@ class GpuGrade:
         c = cp.clip(cct, 0.0, 1.0) * (self.n - 1)
         coords = cp.stack([c[..., 0], c[..., 1], c[..., 2]]).reshape(3, -1)
         out = cp.empty((3,) + lin.shape[:2], cp.float32)
-        # ponytail: 3 separate map_coordinates passes; a fused RawKernel would be
-        # ~3x faster. Only worth it if 4K playback needs more headroom.
+        # NOT debt: this whole 3D-LUT approach was disproved (see the module
+        # docstring), so a fused RawKernel would only speed up code nothing
+        # calls. Kept as the record of what was measured, not as work to do.
         for ch in range(3):
             out[ch] = map_coordinates(self.lut3d[ch], coords, order=1,
                                       mode="nearest").reshape(lin.shape[:2])

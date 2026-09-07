@@ -3,12 +3,6 @@
 One session per connection. GL and NVENC run on the event loop (the whole
 server-side chain is ~2.5ms at 2K); EXR decode runs in a thread pool because a
 4K frame is ~13ms and OIIO releases the GIL.
-
-  ponytail: all sessions share one event loop and one GL context, so encodes
-  serialise. Measured fine to 3 concurrent 2K viewers (21-24.5 fps each) and it
-  will degrade from there. The fix when it matters is a render thread per
-  session, each with its own eglMakeCurrent -- not worth the context juggling
-  until someone actually has viewers to spare.
 """
 import argparse, asyncio, json, struct, time
 from collections import deque, namedtuple
@@ -97,6 +91,11 @@ class Session:
         self.grade = gl.grade_for(self.w, self.h, self.src, gl.DISPLAY, self.view)
         self.dirty = True
 
+    # ponytail: all sessions share one event loop and one GL context, so the
+    # encodes below serialise. Measured fine to 3 concurrent 2K viewers
+    # (21-24.5 fps each) and it degrades from there. Upgrade to a render thread
+    # per session, each with its own eglMakeCurrent, when there are viewers to
+    # spare -- not worth the context juggling before that.
     def encode_current(self, flush=False):
         """Encode the current frame, returning (meta, packet) pairs.
 
