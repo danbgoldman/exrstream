@@ -48,6 +48,9 @@
     <option>23.976</option><option selected>24</option><option>25</option>
     <option>29.97</option><option>30</option><option>48</option><option>60</option>
   </select></label>
+  <label>transport <select id="tr">
+    <option value="ws" selected>websocket</option><option value="rtc">webrtc</option>
+  </select></label>
   <span id="conn" class="dim">connecting…</span>
   <button id="statsb">stats</button>
 </header>
@@ -84,6 +87,7 @@ const lat = [], gaps = [], paintGaps = [], rafGaps = [], idleRaf = [];
 let lastArrival = 0, lastPaint = 0, lastRaf = 0, lastStats = 0, painted = 0;
 let pc = null, dc = null, transport = "websocket";
 let expectSeq = 0, lost = 0, waitKey = false, lastIdrAsk = 0, lastPacket = 0;
+let resyncs = 0, rtcLine = "", lastRtc = 0, prevBytes = 0, prevRtcT = 0;
 
 const pct = (a,p) => a.length ? [...a].sort((x,y)=>x-y)[Math.min(a.length-1,Math.floor(a.length*p/100))] : NaN;
 
@@ -133,8 +137,23 @@ function tick(ts) {
     else { underruns++; nextPresent += period; }
   }
   if (ts - lastStats > 250) { lastStats = ts; stats(); }
+  if (ts - lastRtc > 1000) { lastRtc = ts; pollRtc(); }
 }
 requestAnimationFrame(tick);
+
+async function pollRtc() {
+  if (!pc) return;
+  let rtt = NaN, bytes = 0;
+  (await pc.getStats()).forEach(r => {
+    if (r.type === "candidate-pair" && r.nominated && r.currentRoundTripTime != null)
+      rtt = r.currentRoundTripTime * 1000;
+    if (r.type === "data-channel" && r.bytesReceived != null) bytes = r.bytesReceived;
+  });
+  const t = performance.now();
+  const mbps = prevRtcT ? 8 * (bytes - prevBytes) / (t - prevRtcT) / 1000 : NaN;
+  prevBytes = bytes; prevRtcT = t;
+  rtcLine = `\nrtt ${isNaN(rtt) ? "–" : rtt.toFixed(1)} ms   received ${isNaN(mbps) ? "–" : mbps.toFixed(1)} Mbps`;
+}
 
 function stats() {
   $("#pos").textContent = ready ? `frame ${frameIdx + 1} / ${ready.frames}` : "–";
@@ -153,7 +172,7 @@ arrival gap      p50 ${pct(gaps,50).toFixed(1)}  p95 ${pct(gaps,95).toFixed(1)} 
 paint gap        p50 ${pct(paintGaps,50).toFixed(1)}  p95 ${pct(paintGaps,95).toFixed(1)} ms   target ${ready?(1000/ready.fps).toFixed(1):"–"}
 rAF   playing ${hz(rafGaps)} Hz   idle ${hz(idleRaf)} Hz
 buffer ${TARGET_Q}   queue ${q.length}   underruns ${underruns}   painted ${painted}
-transport ${transport}   packets lost ${lost}`;
+transport ${transport}   packets lost ${lost}   resyncs ${resyncs}${rtcLine}`;
 }
 
 function setupDecoder() {
@@ -194,7 +213,7 @@ function connect() {
       for (const cs of m.colorspaces) $("#src").append(new Option(cs, cs, cs === "ACEScg", cs === "ACEScg"));
       for (const v of m.views) $("#view").append(new Option(v, v));
       setupDecoder();
-      startRTC().catch(e => console.error("webrtc:", e));
+      if ($("#tr").value === "rtc") startRTC().catch(e => console.error("webrtc:", e));
     } else if (m.type === "answer") {
       pc.setRemoteDescription({ type: "answer", sdp: m.sdp })
         .catch(e => console.error("webrtc:", e));
@@ -264,7 +283,7 @@ function askIdr() {
   const now = performance.now();
   if (now - lastIdrAsk < 200) return;
   lastIdrAsk = now;
-  waitKey = true;
+  waitKey = true; resyncs++;
   send({ type:"idr" });
 }
 
@@ -291,16 +310,23 @@ function onFragment(buf) {
   onFrame(out);
 }
 
+function stopRTC() {
+  if (pc) { try { pc.close(); } catch (e) {} }
+  pc = dc = null; transport = "websocket"; rtcLine = ""; stats();
+}
+
 async function startRTC() {
   if (!window.RTCPeerConnection) return;
+  stopRTC();
   pc = new RTCPeerConnection();
-  // Unordered looked right -- nothing here needs SCTP's ordering -- but a
-  // reordered packet is one this client has to drop as stale, and a dropped
-  // packet is a hole the next delta references: block artifacts until the GOP
-  // rolls over. Ordered with no retransmits keeps the property that mattered:
-  // SCTP abandons a lost message and forward-TSNs past it, so a loss costs
-  // about a round trip instead of stalling the stream behind a retransmit.
-  dc = pc.createDataChannel("v", { ordered: true, maxRetransmits: 0 });
+  // Not `maxRetransmits: 0`. One frame is ~78 KB, which SCTP puts on the wire
+  // as roughly 65 UDP packets, so refusing every retransmit means a single lost
+  // datagram destroys the whole frame -- measured at 4% of frames on a link
+  // with bandwidth to spare, each one costing a resync to the next key frame.
+  // A deadline is the knob that actually expresses what video wants: recover
+  // the frame if it can still be shown, abandon it if it cannot. 250 ms is the
+  // client's own buffer depth, so anything later has no one waiting for it.
+  dc = pc.createDataChannel("v", { ordered: true, maxPacketLifeTime: 250 });
   dc.binaryType = "arraybuffer";
   dc.onmessage = e => onFragment(e.data);
   dc.onopen = () => { transport = "webrtc"; expectSeq = 0; stats(); };
@@ -338,6 +364,10 @@ $("#tl").oninput = e => { if (playing) $("#play").onclick(); send({ type:"seek",
 $("#fps").onchange = e => send({ type:"fps", fps:+e.target.value });
 $("#src").onchange = e => send({ type:"look", src:e.target.value });
 $("#view").onchange = e => send({ type:"look", view:e.target.value });
+$("#tr").onchange = e => {
+  if (e.target.value === "rtc") startRTC().catch(err => console.error("webrtc:", err));
+  else stopRTC();          // the server falls back to the socket the moment the channel goes
+};
 $("#statsb").onclick = () => {
   const s = $("#stats"); s.style.display = s.style.display === "none" ? "block" : "none"; stats();
 };

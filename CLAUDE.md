@@ -88,12 +88,20 @@ failure mode this tool has.
   `posix_fadvise(DONTNEED)` or the numbers are page-cache fiction.
 - Frames go over a WebRTC data channel when one is up, the WebSocket otherwise,
   and both carry the identical 20-byte header + Annex-B packet. The channel is
-  `maxRetransmits: 0` -- that is the point, not an oversight -- so the client
-  must handle a missing packet: wait for a key frame and ask for one. It is
+  `maxPacketLifeTime: 250` -- a deadline, not `maxRetransmits: 0`, because one
+  78 KB frame is ~65 UDP datagrams and refusing retransmits loses the frame to
+  any one of them. The client still must handle a missing packet: wait for a key
+  frame and ask for one. It is
   `ordered: true` anyway, because a reordered packet is one the client drops,
   and a dropped packet is a hole the next delta references. Packets are
   fragmented at 16 KB because browsers disagree about the largest SCTP message
   they will reassemble.
+- **Loss looks like blockiness, not like corruption.** A resync forces an IDR,
+  and strict CBR with a one-frame VBV gives an IDR no more bits than a P-frame,
+  so it lands visibly blocky. Chase the loss rate, not the decoder.
+- **The transport is a UI selector, defaulting to the WebSocket**, with round
+  trip and received bitrate on the stats panel. Both real sessions on the data
+  channel went backwards for reasons loopback cannot show; measure, do not guess.
 - **Acks carry the sequence number, and the window is `seq_no - acked`.**
   Decrementing a counter per ack is only correct when nothing can be lost: on
   the data channel each loss leaked a slot until the pump stopped entirely.

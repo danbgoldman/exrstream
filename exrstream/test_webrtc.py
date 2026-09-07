@@ -40,7 +40,7 @@ async def main(url="https://127.0.0.1:8099"):
             assert seqs["type"] == "sequences" and seqs["items"], seqs
 
             pc = RTCPeerConnection()
-            dc = pc.createDataChannel("v", ordered=True, maxRetransmits=0)
+            dc = pc.createDataChannel("v", ordered=True, maxPacketLifeTime=250)
             got, opened = [], asyncio.Event()
             dc.on("open", opened.set)
             dc.on("message", got.append)

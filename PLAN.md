@@ -451,7 +451,7 @@ WebRTC was on the list for one measured reason — TCP head-of-line blocking, se
 as 280 ms stalls and one of 2.1 s against a 33 ms arrival gap — and *not*
 because the stream needed to become a media track. So it did not become one.
 
-Frames go over an **`RTCDataChannel` with `ordered: true, maxRetransmits: 0`**,
+Frames go over an **`RTCDataChannel` with `ordered: true, maxPacketLifeTime: 250`**,
 carrying the identical header + Annex-B packet the WebSocket carried. NVENC
 still feeds WebCodecs directly; nothing is repacketised into RTP, no encoder is
 negotiated in SDP, and the WebSocket stays for control and for signalling. When
@@ -476,6 +476,19 @@ What the transport change forces, and what it does not:
   and the server sizes the window from the highest one seen, so a later ack
   forgives every ack that never came. `test_webrtc.py` drops one ack in four
   and requires the stream to keep up: 24.6 packets/s with the fix, 0.8 without.
+- **A deadline, not `maxRetransmits: 0`.** Refusing every retransmit was the
+  first choice and it was badly wrong at this frame size: one frame is ~78 KB,
+  which SCTP puts on the wire as roughly 65 UDP datagrams, so a single lost
+  datagram destroys the whole frame. Measured on the real link: 4% of frames
+  lost with bandwidth to spare. `maxPacketLifeTime` says what video actually
+  wants — recover the frame if it can still be shown, abandon it if it cannot —
+  and 250 ms is the client's own buffer depth, so nothing later has an audience.
+- **A resync is expensive in a way that looks like corruption.** Every lost
+  frame costs a forced IDR, and under strict CBR with a one-frame VBV an IDR
+  gets no more bits than a P-frame, so it arrives visibly blocky. The scheduled
+  one a second passes unnoticed; sixteen extra ones in 414 frames do not. So
+  loss shows up as blockiness even when nothing is decoded wrong, and cutting
+  the loss rate is the fix rather than anything in the decode path.
 - **Ordered, despite nothing here needing SCTP's ordering.** Unordered was the
   first choice and it was wrong: a reordered packet is one the client must drop
   as stale, and a dropped packet is a hole the next delta references — block
@@ -497,11 +510,17 @@ What the transport change forces, and what it does not:
   vs 42.5 ms on the WebSocket; 4K/20 Mbps (7 fragments a frame) p95 44.4 vs
   43.4. It keeps up.
 
-**What is not measured: whether it fixes the stalls.** Loopback has no loss and
-no HOL blocking, so it can only show the cost, not the benefit. That needs the
-real link, and a browser — `test_webrtc.py` covers the server half (fragment
-order, sequence continuity, NAL boundaries, IDR on request) but the client half
-is JavaScript that only a browser runs.
+**The transport is a selector in the UI, defaulting to the WebSocket.** Two real
+sessions have now gone the wrong way — the first from a window that leaked a
+slot per loss, the second from refusing retransmits — and neither reproduced on
+loopback, which has no loss to leak or refuse. Guessing again is not worth
+another session, so the two transports are one click apart with the link's
+round trip and received bitrate on the stats panel next to them. Default is the
+one measured to work.
+
+`test_webrtc.py` covers the server half (fragment order, sequence continuity,
+NAL boundaries, IDR on request, and a window that survives one ack in four
+going missing). The client half is JavaScript that only a browser runs.
 
 ## Rejected
 
