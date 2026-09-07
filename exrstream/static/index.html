@@ -20,6 +20,11 @@
   #ev { width:220px; } #tl { width:100%; }
   .k { color:var(--accent); font-variant-numeric:tabular-nums; }
   .dim { color:var(--dim); }
+  #cmp { display:none; gap:14px; align-items:center; flex-wrap:wrap;
+         padding:8px 12px; background:var(--panel);
+         border-bottom:1px solid var(--line); }
+  #cmp.on { display:flex; }
+  #wipe { width:220px; }
   #warn { color:var(--warn); padding:6px 12px; background:#241f14;
           border-bottom:1px solid var(--line); display:none; }
   #stage { display:flex; justify-content:center; align-items:center;
@@ -51,8 +56,16 @@
   <label title="Runs the sequence at the display rate. Smoother, but the motion
 is no longer the footage's."><input id="resample" type="checkbox"> match display</label>
   <span id="conn" class="dim">connecting…</span>
+  <button id="cmpb">compare</button>
   <button id="statsb">stats</button>
 </header>
+<div id="cmp">
+  <label>B <select id="seqb"><option value="">— sequence —</option></select></label>
+  <label>in <select id="srcb"></select></label>
+  <label>view <select id="viewb"></select></label>
+  <label>wipe <input id="wipe" type="range" min="0" max="1" step="0.002" value="0.5"></label>
+  <span id="cmpinfo" class="dim"></span>
+</div>
 <div id="warn"></div>
 <div id="stage"><canvas id="c"></canvas></div>
 <footer>
@@ -150,7 +163,7 @@ requestAnimationFrame(tick);
 function stats() {
   $("#pos").textContent = ready ? `frame ${frameIdx + 1} / ${ready.frames}` : "–";
   $("#meta").textContent = ready
-    ? `· ${ready.w}×${ready.h} · ${ready.src_fps}\u2009fps${
+    ? `· ${ready.compare ? "A|B · " : ""}${ready.w}×${ready.h} · ${ready.src_fps}\u2009fps${
         ready.fps === ready.src_fps ? "" : ` (streamed at ${ready.fps}\u2009fps for ${ready.hz}\u2009Hz)`
       } · ${ready.src} → ${ready.view} · cache ${ready.cache_gb} GB`
     : "";
@@ -207,8 +220,20 @@ function connect() {
         o.textContent = `${it.name} — ${it.frames}f ${it.w}×${it.h} (${(it.bytes/2**30).toFixed(1)} GB)`;
         $("#seq").append(o);
       }
-      for (const cs of m.colorspaces) $("#src").append(new Option(cs, cs, cs === "ACEScg", cs === "ACEScg"));
-      for (const v of m.views) $("#view").append(new Option(v, v));
+      for (const it of m.items) {
+        const o = document.createElement("option");
+        o.value = it.key;
+        o.textContent = `${it.name} — ${it.frames}f ${it.w}×${it.h}`;
+        $("#seqb").append(o);
+      }
+      for (const cs of m.colorspaces) {
+        $("#src").append(new Option(cs, cs, cs === "ACEScg", cs === "ACEScg"));
+        $("#srcb").append(new Option(cs, cs, cs === "ACEScg", cs === "ACEScg"));
+      }
+      for (const v of m.views) {
+        $("#view").append(new Option(v, v));
+        $("#viewb").append(new Option(v, v));
+      }
       setupDecoder();
     } else if (m.type === "loading") {
       $("#load").style.display = "flex";
@@ -221,6 +246,15 @@ function connect() {
       for (const b of ["play","prev","next"]) $("#"+b).disabled = false;
       $("#fps").value = String(m.src_fps);
       $("#resample").checked = m.resample;
+      if (m.b_key) {
+        $("#seqb").value = m.b_key;
+        $("#srcb").value = m.b_src; $("#viewb").value = m.b_view;
+      }
+      $("#wipe").value = String(m.wipe);
+      $("#cmpinfo").textContent = m.b_name
+        ? `A ${m.name} (${m.frames}f) | B ${m.b_name} (${m.b_frames}f)` +
+          (m.b_frames < m.frames ? " — B is shorter; its last frame is held" : "")
+        : "pick a B sequence";
       setupDecoder();
       const bad = (m.bad && m.bad.length)
         ? `${m.bad.length} frame(s) unreadable and shown black (first at ${m.bad[0]}). `
@@ -288,6 +322,20 @@ $("#fps").onchange = sendRate;
 $("#resample").onchange = sendRate;
 $("#src").onchange = e => send({ type:"look", src:e.target.value });
 $("#view").onchange = e => send({ type:"look", view:e.target.value });
+$("#cmpb").onclick = () => {
+  const on = $("#cmp").classList.toggle("on");
+  $("#cmpb").className = on ? "k" : "";
+  // Only tell the server when there is actually a B side; otherwise the panel
+  // is just open so you can pick one.
+  if (!on || $("#seqb").value) send({ type:"compare", on });
+};
+$("#seqb").onchange = e => {
+  if (e.target.value) send({ type:"open", key:e.target.value, side:"b" });
+};
+$("#srcb").onchange = e => send({ type:"look", side:"b", src:e.target.value });
+$("#viewb").onchange = e => send({ type:"look", side:"b", view:e.target.value });
+$("#wipe").oninput  = e => send({ type:"wipe", wipe:+e.target.value, final:false });
+$("#wipe").onchange = e => send({ type:"wipe", wipe:+e.target.value, final:true });
 $("#statsb").onclick = () => {
   const s = $("#stats"); s.style.display = s.style.display === "none" ? "block" : "none"; stats();
 };

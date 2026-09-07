@@ -44,6 +44,12 @@ class Session:
         self.view = gl.VIEW
         self.ev, self.epoch, self.frame = 0.0, 0, 0
         self.resample = False
+        # The B side of an A/B wipe: its own sequence and its own look, either
+        # of which may match A's. One pane is a sequence plus a look, so
+        # "compare two renders" and "compare two views" are the same feature.
+        self.seq_b = self.frames_b = self.grade_b = None
+        self.src_b = self.view_b = None
+        self.compare, self.wipe = False, 0.5
         self.playing, self.dirty, self.jump = False, False, False
         self.flush_next = False
         self.settle_at = 0.0
@@ -127,15 +133,62 @@ class Session:
         self.seq, self.frames = seq, frames
         self.h, self.w = frames[0].shape[:2]
         self.grade = gl.grade_for(self.w, self.h, self.src, gl.DISPLAY, self.view)
+        # A sequence of a different size cannot share the output frame, and the
+        # encoder is built for A's geometry.
+        if self.frames_b is not None and self.frames_b[0].shape[:2] != (self.h, self.w):
+            self.seq_b = self.frames_b = self.grade_b = None
+            self.compare = False
         self.seek(0)
         self.retune()
         self._make_encoder()
 
-    def set_look(self, src=None, view=None):
-        self.src = src or self.src
-        self.view = view or self.view
-        self.grade = gl.grade_for(self.w, self.h, self.src, gl.DISPLAY, self.view)
+    def bind_b(self, seq, frames):
+        if frames[0].shape[:2] != (self.h, self.w):
+            h, w = frames[0].shape[:2]
+            raise SequenceError(
+                f"{Path(seq.key).name} is {w}x{h}, but the A side is "
+                f"{self.w}x{self.h}; a wipe needs one frame size")
+        self.seq_b, self.frames_b = seq, frames
+        self.src_b = self.src_b or self.src
+        self.view_b = self.view_b or self.view
+        self.grade_b = gl.grade_for(self.w, self.h, self.src_b, gl.DISPLAY, self.view_b)
+        self.compare = True
+        self.dirty = self.flush_next = self.jump = True
+
+    def set_look(self, src=None, view=None, side="a"):
+        if side == "b":
+            self.src_b = src or self.src_b or self.src
+            self.view_b = view or self.view_b or self.view
+            self.grade_b = gl.grade_for(self.w, self.h, self.src_b,
+                                        gl.DISPLAY, self.view_b)
+        else:
+            self.src = src or self.src
+            self.view = view or self.view
+            self.grade = gl.grade_for(self.w, self.h, self.src, gl.DISPLAY, self.view)
         self.dirty = True
+
+    def render_current(self):
+        """The picture for this frame, wipe and all, as BGRA the encoder takes.
+
+        A and B are graded into the same framebuffer under a scissor, so the
+        comparison costs one extra draw and no extra readback or encode -- and
+        the output stays A's size, which is why a wipe needs no new encoder
+        where a side-by-side would.
+        """
+        self.grade.set_exposure(self.ev)
+        img = self.frames[self.frame % len(self.frames)]
+        if not (self.compare and self.frames_b):
+            return self.grade(img)
+        split = max(0, min(self.w, int(round(self.wipe * self.w))))
+        self.grade.render(img, scissor=(0, 0, split, self.h))
+        # Clamped, not wrapped: past the end of a shorter B, holding its last
+        # frame is at least visibly wrong, where wrapping would look plausible
+        # and compare the wrong pair.
+        b = self.frames_b[min(self.frame, len(self.frames_b) - 1)]
+        self.grade_b.set_exposure(self.ev)
+        self.grade_b.render(b, fbo=self.grade.fbo,
+                            scissor=(split, 0, self.w - split, self.h))
+        return self.grade.read()
 
     # ponytail: all sessions share one event loop and one GL context, so the
     # encodes below serialise. Measured fine to 3 concurrent 2K viewers
@@ -161,8 +214,6 @@ class Session:
         of ours are the previously displayed frame, so the viewer lingers on
         the old frame rather than jumping somewhere unrelated.
         """
-        self.grade.set_exposure(self.ev)
-        img = self.frames[self.frame % len(self.frames)]
         token = object()                         # identity of THIS request
         tag, out = token, []
         for _ in range(8):
@@ -171,7 +222,7 @@ class Session:
             self._pipe.append(Meta(self.frame, self.epoch, self.ev,
                                    self.src, self.view, tag))
             tag = None                           # only the first push is ours
-            for p in self.enc.Encode(self.grade(img)):
+            for p in self.enc.Encode(self.render_current()):
                 meta = (self._pipe.popleft() if self._pipe else
                         Meta(self.frame, self.epoch, self.ev, self.src, self.view, None))
                 out.append((meta, p))
@@ -250,7 +301,12 @@ def ready_msg(s, app, first=0, bad=None):
             "resample": s.resample, "hz": round(s.refresh_hz, 1),
             "src": s.src, "view": s.view, "name": Path(s.seq.key).name,
             "cache_gb": round(app["cache"].bytes / 2**30, 2),
-            "bad": bad or [], "note": note_for(s)}
+            "bad": bad or [], "note": note_for(s),
+            "compare": s.compare, "wipe": s.wipe,
+            "b_key": s.seq_b.key if s.seq_b else None,
+            "b_name": Path(s.seq_b.key).name if s.seq_b else None,
+            "b_frames": len(s.frames_b) if s.frames_b else 0,
+            "b_src": s.src_b, "b_view": s.view_b}
 
 
 async def ws_handler(request):
@@ -313,7 +369,11 @@ async def ws_handler(request):
                 nxt = max(nxt + period, now)
             await asyncio.sleep(0.001)
 
-    async def do_open(key, first, count):
+    async def do_open(key, first, count, side="a"):
+        if side == "b" and s.frames is None:
+            await ws.send_json({"type": "error",
+                                "msg": "open a sequence before comparing one"})
+            return
         seq = next((q for q in app["sequences"] if q.key == key), None)
         if seq is None:
             await ws.send_json({"type": "error", "msg": f"no such sequence {key}"})
@@ -340,8 +400,18 @@ async def ws_handler(request):
         except Exception as e:                                # noqa: BLE001
             await ws.send_json({"type": "error", "msg": f"load failed: {e}"})
             return
-        s.bind(seq, frames)
-        await ws.send_json(ready_msg(s, app, first=first, bad=bad))
+        try:
+            if side == "b":
+                s.bind_b(seq, frames)
+            else:
+                s.bind(seq, frames)
+        except SequenceError as e:
+            await ws.send_json({"type": "error", "msg": str(e)})
+            return
+        # A B-side open must not move the playhead: the point is to compare the
+        # frame you are already looking at.
+        await ws.send_json(ready_msg(s, app, first=s.frame if side == "b" else first,
+                                     bad=bad))
 
     task = asyncio.create_task(pump())
     try:
@@ -361,7 +431,8 @@ async def ws_handler(request):
                 elif s.frames:
                     await ws.send_json({"type": "note", "note": note_for(s)})
             elif t == "open":
-                await do_open(m["key"], int(m.get("first", 0)), int(m.get("count", 0)))
+                await do_open(m["key"], int(m.get("first", 0)),
+                              int(m.get("count", 0)), m.get("side", "a"))
             elif t == "exposure":
                 s.ev = float(m["ev"]); s.epoch = int(m["epoch"])
                 s.dirty = True
@@ -396,10 +467,25 @@ async def ws_handler(request):
                 await ws.send_json(ready_msg(s, app))
             elif t == "look" and s.frames:
                 try:
-                    s.set_look(m.get("src"), m.get("view"))
+                    s.set_look(m.get("src"), m.get("view"), m.get("side", "a"))
                     s.flush_next = True
                 except Exception as e:                        # noqa: BLE001
                     await ws.send_json({"type": "error", "msg": f"look: {e}"})
+            elif t == "compare" and s.frames:
+                s.compare = bool(m["on"]) and s.frames_b is not None
+                s.dirty = s.jump = s.flush_next = True
+            elif t == "wipe" and s.frames:
+                s.wipe = max(0.0, min(1.0, float(m["wipe"])))
+                s.dirty = True
+                if not s.playing:
+                    # Same discipline as the exposure slider: a drag is
+                    # rate-limited to the frame period and flushes by
+                    # repetition, with the settle timer as the backstop.
+                    if m.get("final"):
+                        s.jump = s.flush_next = True
+                        s.settle_at = 0.0
+                    else:
+                        s.settle_at = time.perf_counter() + 0.12
             elif t == "ack":
                 s.acked = max(s.acked, int(m.get("seq", 0)))
     finally:

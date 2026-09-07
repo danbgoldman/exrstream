@@ -440,8 +440,9 @@ them, not by appeal.
    control in the UI — *not* hand-written shader code. OCIO regenerates the
    shader and it stays correct by construction. This is the property that made
    running OCIO's own shader worth it.
-7. **A/B compare, channel isolation, false colour, alpha checkerboard.** All
-   cheap once the above exists.
+7. **A/B compare — done.** See "The A/B wipe" below. Channel isolation, false
+   colour and alpha checkerboard are still open, and are now cheaper still: each
+   is one more way to fill a pane.
 8. ~~**Disk mezzanine + nvdec.**~~ Ruled out by item 3: EXR decode beats
    realtime cold as well as warm. What remains is only a RAM-capacity question
    for sequences too long to cache, which is a different feature.
@@ -493,6 +494,40 @@ bits on repeated frames, so each frame gets 62.5 KB where it used to get 78 KB
 at 15 Mbps. The repeats are not entirely wasted — NVENC refines the same
 picture, improving the reference for the next distinct frame — but quality at a
 given bitrate is lower than it was. Raise `--mbps` if it shows.
+
+## The A/B wipe
+
+Nothing was blocking it. The render path already drew a fullscreen triangle into
+an FBO, so a wipe is two scissored draws into one buffer and a single readback —
+one extra draw, no extra readback, no extra encode, and **no new encoder**,
+because a wipe keeps A's output size where a side-by-side would double it and
+halve the bits per pixel.
+
+**A pane is a sequence plus a look**, which is the model rather than two special
+cases. Change B's sequence and you are comparing two renders; change B's view or
+input colourspace and you are comparing two pipelines on the same footage;
+change both and you are doing whatever you meant to do. Exposure is shared,
+deliberately — a wipe with two exposures compares nothing.
+
+Rules it enforces rather than guesses at, in the style of the rest of the tool:
+
+- **B must be A's frame size.** Refused with the two sizes named, not letterboxed.
+- **Past the end of a shorter B, its last frame is held**, and the UI says so.
+  Wrapping would look plausible and compare the wrong pair, which is the failure
+  mode worth spending a branch on.
+- **A B-side open does not move the playhead.** The point is to compare the
+  frame you are already looking at.
+
+Costs, measured: **+0.97 ms at 2K, +3.86 ms at 4K** for the extra upload and
+draw, so 4K with a wipe is 11.1 ms of grade against a 33 ms budget. Both
+sequences are resident, so RAM is the real limit — two 4K sequences at 66 MB a
+frame.
+
+`test_compare.py` checks it at pixel level: each side matches that side graded
+alone, the wipe ends are whole frames, two different views actually differ, and
+a short B holds rather than wraps. A wipe that silently shows the same picture
+on both sides is worse than no wipe — it answers "no difference" without having
+compared anything.
 
 ## Getting the frame off the GPU
 

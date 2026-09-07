@@ -146,6 +146,46 @@ async def main(url="https://127.0.0.1:8099"):
             (fr, *_), body = await next_frame()
             assert body, "no frame after colourspace change"
             print("  input colourspace change ok")
+
+            # A/B: the same sequence as B is legitimate (compare two looks) and
+            # is the only same-size pair in the test footage.
+            await ws.send_json({"type": "seek", "frame": 7})
+            await burst()
+            await ws.send_json({"type": "open", "key": key, "count": 24, "side": "b"})
+            while True:
+                r = await asyncio.wait_for(ws.receive(), 120)
+                if r.type is aiohttp.WSMsgType.BINARY:
+                    await ws.send_json({"type": "ack",
+                                        "seq": HDR.unpack_from(r.data, 0)[4]})
+                    continue
+                m = json.loads(r.data)
+                if m["type"] == "ready":
+                    break
+                assert m["type"] != "error", m
+            assert m["compare"] and m["b_name"], m
+            assert m["first"] == 7, f"a B-side open moved the playhead to {m['first']}"
+            print(f"  B side loaded, playhead held at {m['first']}")
+
+            await ws.send_json({"type": "look", "side": "b", "view": "Un-tone-mapped"})
+            await ws.send_json({"type": "wipe", "wipe": 0.25, "final": True})
+            (fr, *_), body = await next_frame()
+            assert body, "no frame after a wipe change"
+            print("  B look and wipe both deliver frames")
+
+            # Refuse rather than guess: the other sequence is a different size.
+            other = next(i for i in seqs["items"] if i["key"] != key)
+            await ws.send_json({"type": "open", "key": other["key"], "side": "b"})
+            while True:
+                r = await asyncio.wait_for(ws.receive(), 120)
+                if r.type is aiohttp.WSMsgType.BINARY:
+                    await ws.send_json({"type": "ack",
+                                        "seq": HDR.unpack_from(r.data, 0)[4]})
+                    continue
+                m = json.loads(r.data)
+                if m["type"] in ("error", "ready"):
+                    break
+            assert m["type"] == "error" and "frame size" in m["msg"], m
+            print(f"  mismatched B size refused: {m['msg']}")
     print("OK")
 
 

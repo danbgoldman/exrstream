@@ -229,16 +229,31 @@ void main(){{
             if u.type == ocio.UNIFORM_DOUBLE:
                 glUniform1f(glGetUniformLocation(self.prog, name), float(u.getDouble()))
 
-    def __call__(self, rgba):
+    def render(self, rgba, fbo=None, scissor=None):
+        """Grade one frame into `fbo` (this grade's own by default).
+
+        `fbo` is a parameter so an A/B wipe can put two differently-graded
+        images in one buffer: draw A, then draw B with a scissor over the other
+        side. `scissor` is (x, y, w, h) in pixels.
+        """
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D, self.tex)
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.w, self.h,
                         GL_RGBA, GL_HALF_FLOAT, rgba)
-        glBindFramebuffer(GL_FRAMEBUFFER, self.fbo)
+        glBindFramebuffer(GL_FRAMEBUFFER, self.fbo if fbo is None else fbo)
         glViewport(0, 0, self.w, self.h)
+        if scissor:
+            glEnable(GL_SCISSOR_TEST)
+            glScissor(*scissor)
         glUseProgram(self.prog)
         glBindVertexArray(self.vao)
         glDrawArrays(GL_TRIANGLES, 0, 3)
+        if scissor:
+            glDisable(GL_SCISSOR_TEST)
+
+    def read(self):
+        """Pull this grade's framebuffer back as BGRA uint8."""
+        glBindFramebuffer(GL_FRAMEBUFFER, self.fbo)
         glBindBuffer(GL_PIXEL_PACK_BUFFER, self.pbo)
         glReadPixels(0, 0, self.w, self.h, GL_BGRA, GL_UNSIGNED_BYTE,
                      ctypes.c_void_p(0))
@@ -254,6 +269,10 @@ void main(){{
         glUnmapBuffer(GL_PIXEL_PACK_BUFFER)
         glBindBuffer(GL_PIXEL_PACK_BUFFER, 0)
         return self._buf
+
+    def __call__(self, rgba):
+        self.render(rgba)
+        return self.read()
 
 
 _pool = {}

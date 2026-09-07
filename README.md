@@ -80,6 +80,12 @@ frames so the sequence still runs at its own speed. Playing it faster to make it
 smooth is offered as a checkbox, because it is a lie about motion and you should
 have to ask for it.
 
+**Comparison is a wipe, not a second window.** Put another sequence — or the
+same one under a different view — on the B side, and drag the split. Both halves
+are graded on the GPU into one frame, so a comparison costs one extra draw and
+nothing at all in bitrate, and the exposure slider still moves both sides
+together.
+
 **It refuses rather than guesses.** EXRs carry no colourspace metadata, so the
 input colourspace is something you tell it, not something it infers. Mixed
 resolutions in a sequence are rejected. Frames it cannot read — a render still

@@ -48,6 +48,7 @@ network path.
 
 ```bash
 .venv/bin/python -m exrstream.test_rate      # frame-rate negotiation arithmetic
+.venv/bin/python -m exrstream.test_compare   # A/B wipe, at pixel level
 .venv/bin/python -m exrstream.test_seq        # channel + data/display window handling
 .venv/bin/python -m exrstream.test_grade      # shipped grade vs OCIO's CPU processor
 .venv/bin/python -m exrstream.test_pipeline   # NVENC pipeline-lag regression
@@ -95,6 +96,9 @@ failure mode this tool has.
   Decrementing a counter per ack leaks a slot whenever an ack does not arrive --
   a frame the decoder rejects is enough -- and a few of those stop the pump for
   good. The client acks *before* it decodes, for the same reason.
+- A/B is two scissored draws into A's framebuffer, so it needs no second encoder
+  and no second readback. `Grade.render(img, fbo=, scissor=)` is split out from
+  `Grade.read()` for exactly this; `__call__` is still both.
 - **`src_fps` and `out_fps` are different numbers and must stay that way.**
   `src_fps` is the sequence's declared rate, `out_fps` is what NVENC encodes at
   (a divisor of the client's refresh). `Session.advance` steps the source
