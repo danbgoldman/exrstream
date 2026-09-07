@@ -1,0 +1,10 @@
+spike/restart-llama.sh
+.venv/
+__pycache__/
+*.mp4
+*.h265
+*.exr
+cache/
+testdata/
+spike/dev-*.pem
+footage/
