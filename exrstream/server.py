@@ -48,7 +48,7 @@ class Session:
         self.playing, self.dirty, self.jump = False, False, False
         self.flush_next = False
         self.settle_at = 0.0
-        self.inflight = 0
+        self.acked = 0
         # NVENC returns the packet for the frame pushed 3 pushes ago. Without
         # this FIFO the header describes the frame we just PUSHED while the
         # pixels are three older -- so a step button appeared to jump the wrong
@@ -59,6 +59,18 @@ class Session:
         self.pc = self.dc = None
         self.seq_no = 0
         self.force_idr = False
+
+    @property
+    def inflight(self):
+        """Packets sent and not yet accounted for.
+
+        Counting acks one-for-one against sends only works on a transport that
+        cannot lose a packet. The data channel can, so an unacked packet used to
+        leak a slot of the window permanently: eight losses and the pump stopped
+        for good. Acks carry the sequence number instead, so a later ack
+        subsumes every ack that never happened.
+        """
+        return max(0, self.seq_no - self.acked)
 
     def _make_encoder(self):
         """A fresh encoder whenever geometry or rate changes, and on (re)connect:
@@ -280,7 +292,6 @@ async def ws_handler(request):
                     return
                 for meta, p in pkts:
                     await s.send_packet(s.pack(meta, p))
-                s.inflight += 1
                 nxt = max(nxt + period, now)
             await asyncio.sleep(0.001)
 
@@ -374,7 +385,7 @@ async def ws_handler(request):
                 except Exception as e:                        # noqa: BLE001
                     await ws.send_json({"type": "error", "msg": f"look: {e}"})
             elif t == "ack":
-                s.inflight = max(0, s.inflight - 1)
+                s.acked = max(s.acked, int(m.get("seq", 0)))
             elif t == "offer":
                 try:
                     await s.start_rtc(m["sdp"])
@@ -384,8 +395,13 @@ async def ws_handler(request):
                     await ws.send_json({"type": "note",
                                         "note": f"WebRTC unavailable: {e}"})
             elif t == "idr":
+                # The client asks for this when it has stopped receiving, which
+                # is also the one case where the window can be full of packets
+                # whose acks are never coming. Clear it, or the recovery frame
+                # it is asking for cannot be sent.
                 s.force_idr = True
                 s.dirty = s.jump = True
+                s.acked = s.seq_no
     finally:
         task.cancel()
         await s.stop_rtc()

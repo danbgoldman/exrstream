@@ -83,7 +83,7 @@ const q = []; let TARGET_Q = 6, nextPresent = 0, underruns = 0;
 const lat = [], gaps = [], paintGaps = [], rafGaps = [], idleRaf = [];
 let lastArrival = 0, lastPaint = 0, lastRaf = 0, lastStats = 0, painted = 0;
 let pc = null, dc = null, transport = "websocket";
-let expectSeq = 0, lost = 0, waitKey = false, lastIdrAsk = 0;
+let expectSeq = 0, lost = 0, waitKey = false, lastIdrAsk = 0, lastPacket = 0;
 
 const pct = (a,p) => a.length ? [...a].sort((x,y)=>x-y)[Math.min(a.length-1,Math.floor(a.length*p/100))] : NaN;
 
@@ -113,6 +113,9 @@ function tick(ts) {
     if (idleRaf.length > 240) idleRaf.shift();
   }
   lastRaf = ts;
+  // Nothing arriving at all is the one state the client cannot detect from a
+  // sequence gap, because the gap needs a later packet to reveal it.
+  if (playing && lastPacket && performance.now() - lastPacket > 500) askIdr();
   if (!playing || !ready) { if (ts - lastStats > 400) { lastStats = ts; stats(); } return; }
 
   // Adaptive period: the server clock and this clock always drift, and a fixed
@@ -139,6 +142,10 @@ function stats() {
     ? `· ${ready.w}×${ready.h} · ${ready.fps} fps · ${ready.src} → ${ready.view} · cache ${ready.cache_gb} GB`
     : "";
   if ($("#stats").style.display === "none") return;
+  // Rewriting the text node every 250 ms destroys any selection inside it,
+  // which makes the numbers impossible to copy. Hold still while one is up.
+  const sel = getSelection();
+  if (sel && !sel.isCollapsed && $("#stats").contains(sel.anchorNode)) return;
   const hz = a => a.length ? (1000/pct(a,50)).toFixed(0) : "–";
   $("#stats").textContent =
 `slider → pixels  p50 ${pct(lat,50).toFixed(1)}  p95 ${pct(lat,95).toFixed(1)} ms   n=${lat.length}
@@ -232,16 +239,16 @@ function onFrame(pkt) {
   // missing (or, rarely, late). Either way the decoder must not be handed a
   // delta whose reference never arrived: wait for a key frame and ask for one,
   // since the GOP is a whole second.
-  if (expectSeq && seq < expectSeq) return;                 // stale reorder
+  lastPacket = performance.now();
+  // Every packet is acked by sequence number, including the ones dropped below:
+  // the server sizes its window from the highest ack, so a packet that never
+  // arrives is forgiven by the next one that does rather than leaking a slot.
+  send({ type:"ack", seq });
+  if (expectSeq && seq < expectSeq) return;                 // stale, cannot happen ordered
   if (expectSeq && seq > expectSeq) { lost += seq - expectSeq; waitKey = true; }
   expectSeq = seq + 1;
   if (waitKey) {
-    if (!isKey) {
-      const now = performance.now();
-      if (now - lastIdrAsk > 200) { lastIdrAsk = now; send({ type:"idr" }); }
-      send({ type:"ack", frame: frameIdx });
-      return;
-    }
+    if (!isKey) { askIdr(); return; }
     waitKey = false;
   }
 
@@ -251,7 +258,14 @@ function onFrame(pkt) {
       data: pkt.subarray(20) }));
   } catch (e) { console.error(e); return; }
   if (!playing) $("#tl").value = frameIdx;
-  send({ type:"ack", frame: frameIdx });
+}
+
+function askIdr() {
+  const now = performance.now();
+  if (now - lastIdrAsk < 200) return;
+  lastIdrAsk = now;
+  waitKey = true;
+  send({ type:"idr" });
 }
 
 // A packet is split into <=16 KB fragments, because browsers disagree on the
@@ -280,7 +294,13 @@ function onFragment(buf) {
 async function startRTC() {
   if (!window.RTCPeerConnection) return;
   pc = new RTCPeerConnection();
-  dc = pc.createDataChannel("v", { ordered: false, maxRetransmits: 0 });
+  // Unordered looked right -- nothing here needs SCTP's ordering -- but a
+  // reordered packet is one this client has to drop as stale, and a dropped
+  // packet is a hole the next delta references: block artifacts until the GOP
+  // rolls over. Ordered with no retransmits keeps the property that mattered:
+  // SCTP abandons a lost message and forward-TSNs past it, so a loss costs
+  // about a round trip instead of stalling the stream behind a retransmit.
+  dc = pc.createDataChannel("v", { ordered: true, maxRetransmits: 0 });
   dc.binaryType = "arraybuffer";
   dc.onmessage = e => onFragment(e.data);
   dc.onopen = () => { transport = "webrtc"; expectSeq = 0; stats(); };

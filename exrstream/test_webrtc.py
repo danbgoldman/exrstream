@@ -40,7 +40,7 @@ async def main(url="https://127.0.0.1:8099"):
             assert seqs["type"] == "sequences" and seqs["items"], seqs
 
             pc = RTCPeerConnection()
-            dc = pc.createDataChannel("v", ordered=False, maxRetransmits=0)
+            dc = pc.createDataChannel("v", ordered=True, maxRetransmits=0)
             got, opened = [], asyncio.Event()
             dc.on("open", opened.set)
             dc.on("message", got.append)
@@ -64,16 +64,36 @@ async def main(url="https://127.0.0.1:8099"):
             await asyncio.wait_for(opened.wait(), 15)
             print(f"  data channel open, {ready['w']}x{ready['h']}")
 
-            # Pixels must actually arrive over the channel, not the socket.
+            # Pixels must actually arrive over the channel, not the socket --
+            # and every fourth ack is deliberately never sent, standing in for a
+            # packet that did not arrive to be acked. Sizing the window by
+            # counting acks against sends leaks a slot each time that happens
+            # and wedges the pump for good; sizing it from the highest sequence
+            # number acked means the next ack forgives the ones that never came.
+            async def ack_loop():
+                seen = 0
+                while True:
+                    await asyncio.sleep(0.005)
+                    done = reassemble(got)
+                    while seen < len(done):
+                        seq = HDR.unpack_from(done[seen][1], 0)[4]
+                        seen += 1
+                        if seen % 4:
+                            await ws.send_json({"type": "ack", "seq": seq})
+
             await ws.send_json({"type": "play", "on": True})
-            for _ in range(400):
-                if len(got) >= 30:
-                    break
-                await asyncio.sleep(0.05)
-                for _ in range(8):                      # keep the ack budget open
-                    await ws.send_json({"type": "ack", "frame": 0})
+            acker = asyncio.create_task(ack_loop())
+            loop = asyncio.get_running_loop()
+            t0 = loop.time()
+            while len(reassemble(got)) < 48 and loop.time() - t0 < 15:
+                await asyncio.sleep(0.02)
+            dt = loop.time() - t0
+            acker.cancel()
             await ws.send_json({"type": "play", "on": False})
-            assert len(got) >= 30, f"only {len(got)} fragments over the channel"
+            n = len(reassemble(got))
+            assert n >= 48, f"stream stalled: {n} packets in {dt:.1f}s (window leak?)"
+            assert n / dt > 20, f"only {n/dt:.1f} packets/s with one ack in four dropped"
+            print(f"  {n} packets in {dt:.1f}s ({n/dt:.1f}/s), dropping one ack in four")
 
             pkts = reassemble(got)
             assert pkts, "no packet reassembled"

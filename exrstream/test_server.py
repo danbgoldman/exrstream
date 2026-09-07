@@ -55,7 +55,7 @@ async def main(url="https://127.0.0.1:8099"):
                     r = await asyncio.wait_for(ws.receive(), timeout)
                     if r.type is aiohttp.WSMsgType.BINARY:
                         h = HDR.unpack_from(r.data, 0)
-                        await ws.send_json({"type": "ack", "frame": h[0]})
+                        await ws.send_json({"type": "ack", "seq": h[4]})
                         return h, r.data[HDR.size:]
 
             (fr, ep, ev, fl, _sq), body = await next_frame()
@@ -95,7 +95,7 @@ async def main(url="https://127.0.0.1:8099"):
                         return got
                     if r.type is aiohttp.WSMsgType.BINARY:
                         h = HDR.unpack_from(r.data, 0)
-                        await ws.send_json({"type": "ack", "frame": h[0]})
+                        await ws.send_json({"type": "ack", "seq": h[4]})
                         got.append(h)
 
             await burst()
@@ -125,7 +125,7 @@ async def main(url="https://127.0.0.1:8099"):
                 r = await asyncio.wait_for(ws.receive(), 10)
                 if r.type is aiohttp.WSMsgType.BINARY:
                     await ws.send_json({"type": "ack",
-                                        "frame": HDR.unpack_from(r.data, 0)[0]})
+                                        "seq": HDR.unpack_from(r.data, 0)[4]})
                     continue
                 m = json.loads(r.data)
                 if m["type"] == "ready":

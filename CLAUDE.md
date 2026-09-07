@@ -88,10 +88,16 @@ failure mode this tool has.
   `posix_fadvise(DONTNEED)` or the numbers are page-cache fiction.
 - Frames go over a WebRTC data channel when one is up, the WebSocket otherwise,
   and both carry the identical 20-byte header + Annex-B packet. The channel is
-  unordered with `maxRetransmits: 0` -- that is the point, not an oversight --
-  so the client must handle a missing packet: wait for a key frame and ask for
-  one. Packets are fragmented at 16 KB because browsers disagree about the
-  largest SCTP message they will reassemble.
+  `maxRetransmits: 0` -- that is the point, not an oversight -- so the client
+  must handle a missing packet: wait for a key frame and ask for one. It is
+  `ordered: true` anyway, because a reordered packet is one the client drops,
+  and a dropped packet is a hole the next delta references. Packets are
+  fragmented at 16 KB because browsers disagree about the largest SCTP message
+  they will reassemble.
+- **Acks carry the sequence number, and the window is `seq_no - acked`.**
+  Decrementing a counter per ack is only correct when nothing can be lost: on
+  the data channel each loss leaked a slot until the pump stopped entirely.
+  `test_webrtc` drops one ack in four and fails if throughput collapses.
 - Strict CBR (`vbvbufsize`) is deliberate. Without it NVENC overshoots the
   target ~16% on real footage, and the peak frame doubles, which costs latency.
 

@@ -451,7 +451,7 @@ WebRTC was on the list for one measured reason — TCP head-of-line blocking, se
 as 280 ms stalls and one of 2.1 s against a 33 ms arrival gap — and *not*
 because the stream needed to become a media track. So it did not become one.
 
-Frames go over an **`RTCDataChannel` with `ordered: false, maxRetransmits: 0`**,
+Frames go over an **`RTCDataChannel` with `ordered: true, maxRetransmits: 0`**,
 carrying the identical header + Annex-B packet the WebSocket carried. NVENC
 still feeds WebCodecs directly; nothing is repacketised into RTP, no encoder is
 negotiated in SDP, and the WebSocket stays for control and for signalling. When
@@ -464,7 +464,25 @@ What the transport change forces, and what it does not:
   sequence number, and on a gap stops decoding, waits for a key frame, and asks
   the server for one (`FORCEIDR` on the next push). Without that a lost packet
   means up to a second of corruption, since the GOP is a second. Deltas whose
-  reference never arrived are never handed to the decoder.
+  reference never arrived are never handed to the decoder. Nothing arriving at
+  all is the case a sequence gap cannot reveal — a gap needs a later packet to
+  show it — so a watchdog asks too when half a second passes with no packet.
+- **The window has to be sized by sequence number, not by counting acks.**
+  This is the one that shipped broken. Acking each packet and decrementing a
+  counter is only correct on a transport that cannot lose one: every unacked
+  packet leaked a slot of a three-packet window permanently, so eight losses
+  stopped the stream for good. Measured on the real link as 25 s arrival gaps,
+  477 underruns and a frame rate well under 24. Acks carry the sequence number
+  and the server sizes the window from the highest one seen, so a later ack
+  forgives every ack that never came. `test_webrtc.py` drops one ack in four
+  and requires the stream to keep up: 24.6 packets/s with the fix, 0.8 without.
+- **Ordered, despite nothing here needing SCTP's ordering.** Unordered was the
+  first choice and it was wrong: a reordered packet is one the client must drop
+  as stale, and a dropped packet is a hole the next delta references — block
+  artifacts until the GOP rolls over, which is what the first real session
+  showed. Ordered keeps the property that actually mattered, because PR-SCTP
+  abandons a lost message and forward-TSNs past it: a loss costs about a round
+  trip instead of stalling behind a retransmit the way TCP does.
 - **Fragmentation is unconditional, at 16 KB.** Browsers disagree on the largest
   SCTP message they will reassemble (256 KB in Chrome, 64 KB elsewhere) and one
   strict-CBR frame at 2K/15 Mbps is already 78 KB, so a size check would be a
