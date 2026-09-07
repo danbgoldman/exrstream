@@ -1,66 +1,114 @@
 # exrstream
 
-View EXR sequences in a browser over a thin link. Server-side ACES grade on the
-GPU, NVENC encode, WebCodecs decode. Built for remote review at 10–20 Mbps with
-a live exposure slider.
+Watch EXR sequences in a web browser, from anywhere, with the colour pipeline
+live under your hands.
 
-**Measured: 28 ms from slider to pixels over Tailscale** (decode 0.1 ms, server
-2.5 ms — the rest is network round trip).
+VFX and animation review runs on OpenEXR: scene-linear, high dynamic range,
+half float. Browsers cannot display any of that. The usual answer is to bake a
+proof — pick an exposure, render an H.264, send it — and the moment a reviewer
+asks "what's actually in that highlight?", the proof cannot answer. You bake
+another one.
 
-## Run
+exrstream keeps the question open. The frames stay linear on the server, the
+ACES pipeline runs per frame on a GPU, and only the finished picture is
+encoded. Moving the exposure slider re-renders the stream itself. On a normal
+remote connection the picture catches up with the slider in **under 30
+milliseconds**, which is fast enough that it stops feeling like a control and
+starts feeling like a window.
 
-```bash
-./run.sh --root /path/to/exr/sequences --tls      # start (PID file, logs to /tmp/exrstream.log)
-./run.sh stop
+It is built for review at broadcast bitrates — 10 to 20 Mbit/s, the same budget
+as a streaming film — so it works over a VPN, a hotel connection, or a laptop
+tethered to a phone.
+
+## How it works
+
+```
+   EXR sequence                                            browser
+        │                                                     ▲
+        ▼                                                     │
+   decode once ──► linear frames held in RAM                  │
+                            │                                 │
+        exposure ──────────►│                                 │
+        view/colourspace ──►│                                 │
+                            ▼                                 │
+                  ACES grade on the GPU                       │
+                            │                                 │
+                            ▼                                 │
+                   NVENC video encoder ──► WebSocket ─────────┘
 ```
 
-Then open `https://<host>:8099/` and accept the self-signed certificate.
+Each sequence is decoded from EXR exactly once and kept in memory as linear
+half-float. From there a change to any control is just a re-render of frames
+that are already in RAM: no disk, no re-decode, a couple of milliseconds of
+GPU time. The browser receives ordinary video frames and decodes them in
+hardware, so the client stays a thin, dumb display.
 
-**HTTPS is not optional.** WebCodecs' `VideoDecoder` is `[SecureContext]` and
-simply does not exist over plain http to a LAN or Tailscale IP. `localhost` is
-exempt, so `ssh -N -L 8099:localhost:8099 user@host` also works — but the
-self-signed cert is simpler and measures the real network path.
+## Why the grade runs on the server
 
-Options: `--codec h264|hevc|av1`, `--mbps`, `--port`, `--cache-gb`, `--workers`.
+The tempting alternative is to ship a wide-latitude intermediate and grade in
+the browser, which would make the slider instantaneous and cost the server
+nothing per viewer. At 10–20 Mbit/s it loses badly, for a reason worth
+stating: an intermediate has to carry the entire exposure range at all times,
+while the viewer is only ever looking at part of it. Most of the bitrate is
+spent on picture nobody is currently looking at, and video encoders — tuned for
+display-referred images — handle the rest poorly.
 
-## Design
+Grading first means every bit describes something on screen. It also means the
+picture the reviewer sees is produced by the same colour pipeline a reference
+tool would use, rather than an approximation reimplemented in a shader.
 
-`PLAN.md` is the design and the reasoning; `spike/RESULTS.md` is every Phase 0
-measurement. The three findings that shaped it:
+The cost is that the server does work per viewer, and that a control change has
+to make a round trip. Both turned out to be affordable: the grade and encode
+together take a few milliseconds, so nearly all of the delay you feel is the
+speed of light and your ISP.
 
-1. **Grade on the server, not the client.** At 10–20 Mbps a log intermediate
-   wastes over half its bitrate on off-screen range and fights the codec's rate
-   control. Display-referred output also makes 4:2:0 chroma harmless.
-2. **Run OCIO's own shader, not a baked 3D LUT.** ACES 2.0's gamut compressor
-   clips channels to exactly 0 along a surface in the colour cube; trilinear
-   interpolation smears that discontinuity with only O(1/n) convergence.
-3. **Match frame rate to the client's display refresh.** 24 fps on a 30 Hz
-   panel is 1.25 refreshes per frame and cannot be presented evenly. The app
-   warns rather than silently misrepresenting motion.
+## Design decisions worth knowing
 
-## Test footage
+**The colour is the real product.** exrstream runs OpenColorIO's own ACES
+output transform, GPU code generated by OCIO itself, rather than a colour
+pipeline reimplemented here. Adding stages later means adding transforms, not
+rewriting a shader. A test checks the shipped grade against OCIO's independent
+CPU implementation on deliberately hostile imagery, because a review tool that
+is confidently wrong about colour is worse than no review tool.
+
+**Frame rate has to match the viewer's display.** 24 fps content on a 30 Hz
+screen cannot be shown evenly — it is 1.25 refreshes per frame — and the result
+is judder that looks like a network problem but is not. (Laptops on battery
+routinely drop to 30 Hz.) exrstream measures the browser's actual refresh rate
+and says so, rather than silently misrepresenting motion.
+
+**It refuses rather than guesses.** EXRs carry no colourspace metadata, so the
+input colourspace is something you tell it, not something it infers. Mixed
+resolutions in a sequence are rejected. Frames it cannot read — a render still
+being written — appear black and are reported, rather than being skipped in a
+way that would quietly alter timing.
+
+## Try it
 
 ```bash
-./fetch-footage.sh 01_1a linear_hd 240 0 footage/tos_hd   # 1920x1012 PIZ
-./fetch-footage.sh 01_1a linear    72 0 footage/tos_4k    # 4096x2160 uncompressed
-./run.sh restart --root footage --tls --src "Linear Rec.709 (sRGB)"
+./run.sh --root /path/to/exr/sequences --tls
 ```
 
-Tears of Steel original camera footage, (CC) Blender Foundation |
-mango.blender.org. It is Rec.709 scene-linear, **not** ACEScg -- and EXRs carry
-no colourspace metadata, so this cannot be detected. Set `--src` to match your
-footage or pick it in the UI.
+Open `https://<host>:8099/` and accept the certificate. Pick a sequence, set
+the input colourspace to match your footage, and drag the exposure slider.
 
-## Tests
+`CLAUDE.md` covers running it in detail; `PLAN.md` is the full design and the
+reasoning behind each decision; `spike/RESULTS.md` has the measurements that
+settled them.
 
-```bash
-.venv/bin/python -m exrstream.test_seq        # channel + window handling
-.venv/bin/python -m exrstream.test_grade      # grade vs OCIO's CPU processor
-.venv/bin/python -m exrstream.test_pipeline   # NVENC pipeline-lag regression
-.venv/bin/python -m exrstream.test_server     # protocol, needs a running server
-```
+## Status
 
-## Requires
+Working, and used. Single-machine, no accounts, no access control — it assumes
+you already trust everyone who can reach the port. Sequences are held in RAM,
+so length is bounded by memory rather than disk. Tested with several
+simultaneous viewers, each with independent controls, not with a large audience.
 
-NVIDIA GPU with NVENC, and a GPU-capable EGL driver (no X needed). Developed on
-a GB10 (aarch64); every dependency installs from wheels and ffmpeg is not used.
+Requires an NVIDIA GPU with a hardware video encoder. Developed on an NVIDIA
+GB10; ffmpeg is not used anywhere.
+
+## Credits
+
+Test footage is from *Tears of Steel*, (CC) Blender Foundation |
+[mango.blender.org](https://mango.blender.org), used under CC-BY. Colour
+management by [OpenColorIO](https://opencolorio.org) with the ACES 2.0
+reference configuration; image I/O by [OpenImageIO](https://openimageio.org).
