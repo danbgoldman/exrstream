@@ -77,14 +77,7 @@ def _rgb_indices(names):
     match on.
     """
     low = [n.lower() for n in names]
-    idx = []
-    for want in ("r", "g", "b"):
-        for cand in (want, f"{want}gb"[0]):
-            if cand in low:
-                idx.append(low.index(cand))
-                break
-        else:
-            idx.append(None)
+    idx = [low.index(c) if c in low else None for c in ("r", "g", "b")]
     if all(i is not None for i in idx):
         return idx
     for lum in ("y", "luminance", "l"):
@@ -159,20 +152,14 @@ class FrameCache:
         mt = max(f.stat().st_mtime_ns for f in seq.files[first:first + count])
         return (seq.key, first, count, mt)
 
-    def get(self, seq, first, count):
-        with self._lock:
-            k = self._key(seq, first, count)
-            if k in self._d:
-                self._d.move_to_end(k)
-                return self._d[k]
-        return None
-
     def load(self, seq, first, count, progress=None):
         """Decode into the cache. Blocking -- call it in an executor."""
         k = self._key(seq, first, count)
-        hit = self.get(seq, first, count)
-        if hit is not None:
-            return hit
+        with self._lock:
+            if k in self._d:
+                self._d.move_to_end(k)
+                self.bad = []
+                return self._d[k]
         frames, bad, w, h = [], [], None, None
         for i, f in enumerate(seq.files[first:first + count]):
             try:

@@ -43,10 +43,6 @@ def views(display=DISPLAY):
     return list(config().getViews(display))
 
 
-def displays():
-    return list(config().getDisplays())
-
-
 def make_context(gl_major=4, gl_minor=3):
     """Bind the GPU directly via the EGL device platform: no X, no dev headers.
 
@@ -179,8 +175,6 @@ void main(){{
         glUniform1i(glGetUniformLocation(self.prog, "img"), 0)
         glUniform2f(glGetUniformLocation(self.prog, "res"), float(w), float(h))
         self._ev_prop = self.desc.getDynamicProperty(ocio.DYNAMIC_PROPERTY_EXPOSURE)
-        self.cpu = self.proc.getDefaultCPUProcessor()
-        self._cpu_prop = self.cpu.getDynamicProperty(ocio.DYNAMIC_PROPERTY_EXPOSURE)
         self.ev = None
         self.set_exposure(0.0)
 
@@ -204,25 +198,18 @@ void main(){{
         self._luts.append(tid); self.unit += 1
 
     def _lut3d(self, t):
-        vals = np.asarray(t.getValues(), np.float32)
-        tid = glGenTextures(1)
-        glActiveTexture(GL_TEXTURE0 + self.unit)
-        glBindTexture(GL_TEXTURE_3D, tid)
-        n = t.edgeLen
-        glTexImage3D(GL_TEXTURE_3D, 0, GL_RGB32F, n, n, n, 0, GL_RGB, GL_FLOAT, vals)
-        for k in (GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER):
-            glTexParameteri(GL_TEXTURE_3D, k, GL_LINEAR)
-        for k in (GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T, GL_TEXTURE_WRAP_R):
-            glTexParameteri(GL_TEXTURE_3D, k, GL_CLAMP_TO_EDGE)
-        glUniform1i(glGetUniformLocation(self.prog, t.samplerName), self.unit)
-        self._luts.append(tid); self.unit += 1
+        # No view in the shipped ACES config emits a 3D texture (all four
+        # checked). Refuse rather than carry an upload path nothing exercises:
+        # silently skipping one would give wrong colour, which is the failure
+        # this tool exists to prevent.
+        raise RuntimeError(
+            f"{self.view!r} needs a {t.edgeLen}^3 GPU LUT, which is not wired up")
 
     def set_exposure(self, ev):
         if ev == self.ev:
             return
         self.ev = ev
         self._ev_prop.setDouble(float(ev))
-        self._cpu_prop.setDouble(float(ev))
         glUseProgram(self.prog)
         for name, u in self.desc.getUniforms():
             if u.type == ocio.UNIFORM_DOUBLE:

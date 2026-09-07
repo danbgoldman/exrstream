@@ -284,13 +284,13 @@ can drop a late packet instead of stalling the whole stream behind it.
 ## Artifacts
 
 - `spike/01_nvenc_caps.py` … `09_demo.py` — each runnable standalone
+  (`06_grade.py`, the disproved 3D-LUT approach, was deleted once its numbers
+  were recorded above; recover it from git if you want to re-derive them)
 - `spike/egl_ctx.py` — headless GL context, no X, no dev headers
 - `spike/07_ocio_gpu.py` — the grade; `_selftest()` asserts against OCIO CPU
 - `testdata/frame_ev0.png`, `testdata/sweep.264` — EV −4→+4 sweep, 96 frames
-- `spike/10_server.py`, `spike/static/index.html` — the streaming viewer
-- `spike/serve.sh` — start/stop by PID file (`restart`, `stop`). Do not use
-  `pkill -f 10_server.py`: the pattern matches the invoking shell's own command
-  line and kills the caller.
-- `spike/11_wsprobe.py` — headless protocol/bitstream check
+- the streaming viewer and its probe were superseded by `exrstream/` and
+  deleted; `run.sh` replaces `spike/serve.sh` (do not use `pkill -f server.py`:
+  the pattern matches the invoking shell's own command line and kills the caller)
 - `spike/restart-llama.sh` — restores the llama-server stopped for these runs
   (mode 700; it carries an API key from the process command line)

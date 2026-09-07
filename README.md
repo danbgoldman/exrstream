@@ -55,8 +55,9 @@ footage or pick it in the UI.
 
 ```bash
 .venv/bin/python -m exrstream.test_seq        # channel + window handling
+.venv/bin/python -m exrstream.test_grade      # grade vs OCIO's CPU processor
+.venv/bin/python -m exrstream.test_pipeline   # NVENC pipeline-lag regression
 .venv/bin/python -m exrstream.test_server     # protocol, needs a running server
-PYTHONPATH=spike .venv/bin/python spike/07_ocio_gpu.py   # grade vs OCIO CPU
 ```
 
 ## Requires
