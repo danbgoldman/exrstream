@@ -413,10 +413,10 @@ needed.** Cold 4K decode is 2× realtime.
 Phase 1 works and is committed. These are ordered by how much measurement backs
 them, not by appeal.
 
-1. ~~**WebRTC transport.**~~ **Built — see below.** Not the media-track WebRTC
-   the plan imagined: an unreliable, unordered **data channel** carrying the
-   same packets, which removes head-of-line blocking without giving up NVENC or
-   WebCodecs. Effect on the real link is not yet measured.
+1. ~~**WebRTC transport.**~~ **Built, measured, removed.** A data channel
+   carrying the same packets loses to the WebSocket on the real link — see
+   "WebRTC, measured and rejected" below. The defect that motivated it is still
+   real; this answer to it is not.
 2. **Negotiate frame rate automatically.** The client already measures its
    refresh and the server already warns when the rate cannot be presented
    evenly, but choosing the rate is still manual. NVENC's `Reconfigure` makes
@@ -445,82 +445,62 @@ them, not by appeal.
    realtime cold as well as warm. What remains is only a RAM-capacity question
    for sequences too long to cache, which is a different feature.
 
-## The transport, as built
+## WebRTC, measured and rejected
 
-WebRTC was on the list for one measured reason — TCP head-of-line blocking, seen
-as 280 ms stalls and one of 2.1 s against a 33 ms arrival gap — and *not*
-because the stream needed to become a media track. So it did not become one.
+WebRTC was top of the Phase 2 list for one measured reason — TCP head-of-line
+blocking, seen as 280 ms stalls and one of 2.1 s — and not because the stream
+needed to become a media track. So it was built as the small version: an
+`RTCDataChannel` carrying the identical header + Annex-B packets, NVENC still
+feeding WebCodecs directly, the WebSocket kept for control and signalling.
 
-Frames go over an **`RTCDataChannel` with `ordered: true, maxPacketLifeTime: 250`**,
-carrying the identical header + Annex-B packet the WebSocket carried. NVENC
-still feeds WebCodecs directly; nothing is repacketised into RTP, no encoder is
-negotiated in SDP, and the WebSocket stays for control and for signalling. When
-the channel is not up, packets go down the socket as before, so this is an
-upgrade rather than a fork.
+**It lost.** Same session, same 30 fps, same link (22 ms RTT), one click apart:
 
-What the transport change forces, and what it does not:
+| target 33.3 ms | WebSocket | data channel |
+|----------------|-----------|--------------|
+| arrival gap p50 | **33.0** | 41.9 |
+| arrival gap p95 | **39.6** | 81.0 |
+| paint gap p95 | **34.3** | 67.4 |
+| underruns | **5** | 30 |
+| packets lost | 0 | 0 |
 
-- **A loss is now possible, so it has to be handled.** The client keeps a packet
-  sequence number, and on a gap stops decoding, waits for a key frame, and asks
-  the server for one (`FORCEIDR` on the next push). Without that a lost packet
-  means up to a second of corruption, since the GOP is a second. Deltas whose
-  reference never arrived are never handed to the decoder. Nothing arriving at
-  all is the case a sequence gap cannot reveal — a gap needs a later packet to
-  show it — so a watchdog asks too when half a second passes with no packet.
-- **The window has to be sized by sequence number, not by counting acks.**
-  This is the one that shipped broken. Acking each packet and decrementing a
-  counter is only correct on a transport that cannot lose one: every unacked
-  packet leaked a slot of a three-packet window permanently, so eight losses
-  stopped the stream for good. Measured on the real link as 25 s arrival gaps,
-  477 underruns and a frame rate well under 24. Acks carry the sequence number
-  and the server sizes the window from the highest one seen, so a later ack
-  forgives every ack that never came. `test_webrtc.py` drops one ack in four
-  and requires the stream to keep up: 24.6 packets/s with the fix, 0.8 without.
-- **A deadline, not `maxRetransmits: 0`.** Refusing every retransmit was the
-  first choice and it was badly wrong at this frame size: one frame is ~78 KB,
-  which SCTP puts on the wire as roughly 65 UDP datagrams, so a single lost
-  datagram destroys the whole frame. Measured on the real link: 4% of frames
-  lost with bandwidth to spare. `maxPacketLifeTime` says what video actually
-  wants — recover the frame if it can still be shown, abandon it if it cannot —
-  and 250 ms is the client's own buffer depth, so nothing later has an audience.
-- **A resync is expensive in a way that looks like corruption.** Every lost
-  frame costs a forced IDR, and under strict CBR with a one-frame VBV an IDR
-  gets no more bits than a P-frame, so it arrives visibly blocky. The scheduled
-  one a second passes unnoticed; sixteen extra ones in 414 frames do not. So
-  loss shows up as blockiness even when nothing is decoded wrong, and cutting
-  the loss rate is the fix rather than anything in the decode path.
-- **Ordered, despite nothing here needing SCTP's ordering.** Unordered was the
-  first choice and it was wrong: a reordered packet is one the client must drop
-  as stale, and a dropped packet is a hole the next delta references — block
-  artifacts until the GOP rolls over, which is what the first real session
-  showed. Ordered keeps the property that actually mattered, because PR-SCTP
-  abandons a lost message and forward-TSNs past it: a loss costs about a round
-  trip instead of stalling behind a retransmit the way TCP does.
-- **Fragmentation is unconditional, at 16 KB.** Browsers disagree on the largest
-  SCTP message they will reassemble (256 KB in Chrome, 64 KB elsewhere) and one
-  strict-CBR frame at 2K/15 Mbps is already 78 KB, so a size check would be a
-  branch that is taken in the common case. A lost fragment is a lost frame,
-  which is the case above.
-- **No trickle ICE.** With no STUN server the host candidates are ready
-  immediately, so both sides gather fully before exchanging one offer and one
-  answer.
-- **aiortc's SCTP is pure Python and shares the event loop with GL and NVENC**,
-  which is the obvious way this could have been slower than the TCP it replaces.
-  Measured on loopback, arrival gaps are indistinguishable: HD/15 Mbps p95 42.4
-  vs 42.5 ms on the WebSocket; 4K/20 Mbps (7 fragments a frame) p95 44.4 vs
-  43.4. It keeps up.
+aiortc delivers 14.5 Mbps against a 15 Mbps target, so the average is right and
+the distribution is not: p50 and p95 sit near 2x and 4x the round trip, which is
+what congestion-window-limited delivery looks like — bytes arriving in
+round-trip-quantised bursts rather than paced. **On loopback the two transports
+were indistinguishable** (p95 42.4 vs 42.5 ms), because with RTT near zero the
+window never binds. Every measurement made on this machine was therefore blind
+to the only thing that mattered.
 
-**The transport is a selector in the UI, defaulting to the WebSocket.** Two real
-sessions have now gone the wrong way — the first from a window that leaked a
-slot per loss, the second from refusing retransmits — and neither reproduced on
-loopback, which has no loss to leak or refuse. Guessing again is not worth
-another session, so the two transports are one click apart with the link's
-round trip and received bitrate on the stats panel next to them. Default is the
-one measured to work.
+So it is deleted, along with `aiortc` and the PyAV it drags in. What that
+verdict does *not* say: WebRTC is wrong. It says a pure-Python SCTP stack
+cannot pace 15 Mbps over a real round trip. A native implementation — GStreamer
+`webrtcbin` with a real media track — would not have this problem, at the cost
+of giving up NVENC straight into WebCodecs and being a far larger build. If the
+280 ms stalls ever become the binding constraint, that is the version to build.
 
-`test_webrtc.py` covers the server half (fragment order, sequence continuity,
-NAL boundaries, IDR on request, and a window that survives one ack in four
-going missing). The client half is JavaScript that only a browser runs.
+Three things learned on the way, which outlive the transport:
+
+- **A window sized by counting acks against sends leaks.** Every ack that does
+  not arrive costs a slot permanently, and a few of those stop the pump for
+  good — measured as 25 s arrival gaps and 477 underruns. Acks carry the
+  sequence number and the window is `seq_no - acked`, so a later ack forgives
+  the ones that never came. This survived the deletion: on the WebSocket a
+  frame the decoder *rejects* is the same leak, which is why the client now
+  acks before decoding rather than after.
+- **Loss shows up as blockiness, not as corruption.** Every lost frame costs a
+  forced IDR, and under strict CBR with a one-frame VBV an IDR gets no more
+  bits than a P-frame, so it lands visibly blocky. One a second passes
+  unnoticed; sixteen extra in 414 frames does not.
+- **`maxRetransmits: 0` is the wrong knob for video at this frame size.** One
+  frame is ~78 KB, which SCTP puts on the wire as ~65 UDP datagrams, so
+  refusing retransmits loses the frame to any one of them — 4% of frames on a
+  link with bandwidth to spare. `maxPacketLifeTime` says the useful thing
+  instead: recover it if it can still be shown, abandon it if it cannot.
+
+And one about measuring: the client recorded arrival gaps while **paused**,
+where the server sends only on changes, so "max 19728 ms" was the length of
+time nobody touched anything. It sent a debugging session chasing stalls that
+were not there. Gaps are now recorded only during playback.
 
 ## Rejected
 

@@ -48,9 +48,6 @@
     <option>23.976</option><option selected>24</option><option>25</option>
     <option>29.97</option><option>30</option><option>48</option><option>60</option>
   </select></label>
-  <label>transport <select id="tr">
-    <option value="ws" selected>websocket</option><option value="rtc">webrtc</option>
-  </select></label>
   <span id="conn" class="dim">connecting…</span>
   <button id="statsb">stats</button>
 </header>
@@ -85,9 +82,6 @@ let epoch = 0, pending = null, playing = false, frameIdx = 0;
 const q = []; let TARGET_Q = 6, nextPresent = 0, underruns = 0;
 const lat = [], gaps = [], paintGaps = [], rafGaps = [], idleRaf = [];
 let lastArrival = 0, lastPaint = 0, lastRaf = 0, lastStats = 0, painted = 0;
-let pc = null, dc = null, transport = "websocket";
-let expectSeq = 0, lost = 0, waitKey = false, lastIdrAsk = 0, lastPacket = 0;
-let resyncs = 0, rtcLine = "", lastRtc = 0, prevBytes = 0, prevRtcT = 0;
 
 const pct = (a,p) => a.length ? [...a].sort((x,y)=>x-y)[Math.min(a.length-1,Math.floor(a.length*p/100))] : NaN;
 
@@ -117,9 +111,6 @@ function tick(ts) {
     if (idleRaf.length > 240) idleRaf.shift();
   }
   lastRaf = ts;
-  // Nothing arriving at all is the one state the client cannot detect from a
-  // sequence gap, because the gap needs a later packet to reveal it.
-  if (playing && lastPacket && performance.now() - lastPacket > 500) askIdr();
   if (!playing || !ready) { if (ts - lastStats > 400) { lastStats = ts; stats(); } return; }
 
   // Adaptive period: the server clock and this clock always drift, and a fixed
@@ -137,23 +128,8 @@ function tick(ts) {
     else { underruns++; nextPresent += period; }
   }
   if (ts - lastStats > 250) { lastStats = ts; stats(); }
-  if (ts - lastRtc > 1000) { lastRtc = ts; pollRtc(); }
 }
 requestAnimationFrame(tick);
-
-async function pollRtc() {
-  if (!pc) return;
-  let rtt = NaN, bytes = 0;
-  (await pc.getStats()).forEach(r => {
-    if (r.type === "candidate-pair" && r.nominated && r.currentRoundTripTime != null)
-      rtt = r.currentRoundTripTime * 1000;
-    if (r.type === "data-channel" && r.bytesReceived != null) bytes = r.bytesReceived;
-  });
-  const t = performance.now();
-  const mbps = prevRtcT ? 8 * (bytes - prevBytes) / (t - prevRtcT) / 1000 : NaN;
-  prevBytes = bytes; prevRtcT = t;
-  rtcLine = `\nrtt ${isNaN(rtt) ? "–" : rtt.toFixed(1)} ms   received ${isNaN(mbps) ? "–" : mbps.toFixed(1)} Mbps`;
-}
 
 function stats() {
   $("#pos").textContent = ready ? `frame ${frameIdx + 1} / ${ready.frames}` : "–";
@@ -171,8 +147,7 @@ function stats() {
 arrival gap      p50 ${pct(gaps,50).toFixed(1)}  p95 ${pct(gaps,95).toFixed(1)}  max ${gaps.length?Math.max(...gaps).toFixed(0):"–"} ms
 paint gap        p50 ${pct(paintGaps,50).toFixed(1)}  p95 ${pct(paintGaps,95).toFixed(1)} ms   target ${ready?(1000/ready.fps).toFixed(1):"–"}
 rAF   playing ${hz(rafGaps)} Hz   idle ${hz(idleRaf)} Hz
-buffer ${TARGET_Q}   queue ${q.length}   underruns ${underruns}   painted ${painted}
-transport ${transport}   packets lost ${lost}   resyncs ${resyncs}${rtcLine}`;
+buffer ${TARGET_Q}   queue ${q.length}   underruns ${underruns}   painted ${painted}`;
 }
 
 function setupDecoder() {
@@ -180,7 +155,11 @@ function setupDecoder() {
   dec = new VideoDecoder({
     output: f => {
       const now = performance.now();
-      if (lastArrival) { gaps.push(now - lastArrival); if (gaps.length > 300) gaps.shift(); }
+      // Only while playing. Paused, the server sends on changes only, so the
+      // gap to the next frame is however long nobody touched anything -- which
+      // read as a 20 s stall and sent a debugging session in the wrong
+      // direction.
+      if (lastArrival && playing) { gaps.push(now - lastArrival); if (gaps.length > 300) gaps.shift(); }
       lastArrival = now;
       if (!playing) { flushQ(); paint(f); stats(); return; }
       q.push(f);
@@ -213,10 +192,6 @@ function connect() {
       for (const cs of m.colorspaces) $("#src").append(new Option(cs, cs, cs === "ACEScg", cs === "ACEScg"));
       for (const v of m.views) $("#view").append(new Option(v, v));
       setupDecoder();
-      if ($("#tr").value === "rtc") startRTC().catch(e => console.error("webrtc:", e));
-    } else if (m.type === "answer") {
-      pc.setRemoteDescription({ type: "answer", sdp: m.sdp })
-        .catch(e => console.error("webrtc:", e));
     } else if (m.type === "loading") {
       $("#load").style.display = "flex";
       $("#barf").style.width = `${100 * m.done / m.total}%`;
@@ -254,22 +229,10 @@ function onFrame(pkt) {
   const ep = dv.getUint32(4, true), isKey = dv.getUint32(12, true) === 1;
   const seq = dv.getUint32(16, true);
 
-  // The data channel neither retransmits nor orders, so a packet can be
-  // missing (or, rarely, late). Either way the decoder must not be handed a
-  // delta whose reference never arrived: wait for a key frame and ask for one,
-  // since the GOP is a whole second.
-  lastPacket = performance.now();
-  // Every packet is acked by sequence number, including the ones dropped below:
-  // the server sizes its window from the highest ack, so a packet that never
-  // arrives is forgiven by the next one that does rather than leaking a slot.
+  // Ack before decoding, not after: the server sizes its send window from the
+  // highest sequence number acked, and a frame the decoder rejects is still a
+  // frame that arrived. Acking only on success leaks a slot of the window.
   send({ type:"ack", seq });
-  if (expectSeq && seq < expectSeq) return;                 // stale, cannot happen ordered
-  if (expectSeq && seq > expectSeq) { lost += seq - expectSeq; waitKey = true; }
-  expectSeq = seq + 1;
-  if (waitKey) {
-    if (!isKey) { askIdr(); return; }
-    waitKey = false;
-  }
 
   try {
     dec.decode(new EncodedVideoChunk({
@@ -277,67 +240,6 @@ function onFrame(pkt) {
       data: pkt.subarray(20) }));
   } catch (e) { console.error(e); return; }
   if (!playing) $("#tl").value = frameIdx;
-}
-
-function askIdr() {
-  const now = performance.now();
-  if (now - lastIdrAsk < 200) return;
-  lastIdrAsk = now;
-  waitKey = true; resyncs++;
-  send({ type:"idr" });
-}
-
-// A packet is split into <=16 KB fragments, because browsers disagree on the
-// largest SCTP message they will reassemble and one CBR frame already exceeds
-// the smallest of those limits. A fragment lost is the frame lost, which is
-// the same case as a packet lost above.
-const frags = new Map();
-function onFragment(buf) {
-  const dv = new DataView(buf);
-  const seq = dv.getUint32(0, true), i = dv.getUint8(4), n = dv.getUint8(5);
-  const body = new Uint8Array(buf, 6);
-  if (n === 1) return onFrame(body);
-  let f = frags.get(seq);
-  if (!f) { frags.set(seq, f = { n, got: 0, len: 0, parts: new Array(n) }); }
-  if (f.parts[i]) return;
-  f.parts[i] = body; f.got++; f.len += body.byteLength;
-  for (const k of frags.keys()) if (seq - k > 8) frags.delete(k);  // never completing
-  if (f.got !== n) return;
-  frags.delete(seq);
-  const out = new Uint8Array(f.len);
-  let o = 0;
-  for (const part of f.parts) { out.set(part, o); o += part.byteLength; }
-  onFrame(out);
-}
-
-function stopRTC() {
-  if (pc) { try { pc.close(); } catch (e) {} }
-  pc = dc = null; transport = "websocket"; rtcLine = ""; stats();
-}
-
-async function startRTC() {
-  if (!window.RTCPeerConnection) return;
-  stopRTC();
-  pc = new RTCPeerConnection();
-  // Not `maxRetransmits: 0`. One frame is ~78 KB, which SCTP puts on the wire
-  // as roughly 65 UDP packets, so refusing every retransmit means a single lost
-  // datagram destroys the whole frame -- measured at 4% of frames on a link
-  // with bandwidth to spare, each one costing a resync to the next key frame.
-  // A deadline is the knob that actually expresses what video wants: recover
-  // the frame if it can still be shown, abandon it if it cannot. 250 ms is the
-  // client's own buffer depth, so anything later has no one waiting for it.
-  dc = pc.createDataChannel("v", { ordered: true, maxPacketLifeTime: 250 });
-  dc.binaryType = "arraybuffer";
-  dc.onmessage = e => onFragment(e.data);
-  dc.onopen = () => { transport = "webrtc"; expectSeq = 0; stats(); };
-  dc.onclose = dc.onerror = () => { transport = "websocket"; stats(); };
-  await pc.setLocalDescription(await pc.createOffer());
-  // Gather fully before offering: without a STUN server the host candidates
-  // are immediate, and that is one round of signalling instead of trickle.
-  if (pc.iceGatheringState !== "complete")
-    await new Promise(r => pc.addEventListener("icegatheringstatechange",
-      () => pc.iceGatheringState === "complete" && r()));
-  send({ type:"offer", sdp: pc.localDescription.sdp });
 }
 
 $("#seq").onchange = e => { if (e.target.value) send({ type:"open", key:e.target.value }); };
@@ -364,10 +266,6 @@ $("#tl").oninput = e => { if (playing) $("#play").onclick(); send({ type:"seek",
 $("#fps").onchange = e => send({ type:"fps", fps:+e.target.value });
 $("#src").onchange = e => send({ type:"look", src:e.target.value });
 $("#view").onchange = e => send({ type:"look", view:e.target.value });
-$("#tr").onchange = e => {
-  if (e.target.value === "rtc") startRTC().catch(err => console.error("webrtc:", err));
-  else stopRTC();          // the server falls back to the socket the moment the channel goes
-};
 $("#statsb").onclick = () => {
   const s = $("#stats"); s.style.display = s.style.display === "none" ? "block" : "none"; stats();
 };

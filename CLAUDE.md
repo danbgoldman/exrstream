@@ -86,26 +86,16 @@ failure mode this tool has.
   workers; cold, a single reader gets 0.55 GB/s against the 1.27 GB/s a 4K
   sequence needs at 24 fps, and 8 workers get 2.67. Benchmark with
   `posix_fadvise(DONTNEED)` or the numbers are page-cache fiction.
-- Frames go over a WebRTC data channel when one is up, the WebSocket otherwise,
-  and both carry the identical 20-byte header + Annex-B packet. The channel is
-  `maxPacketLifeTime: 250` -- a deadline, not `maxRetransmits: 0`, because one
-  78 KB frame is ~65 UDP datagrams and refusing retransmits loses the frame to
-  any one of them. The client still must handle a missing packet: wait for a key
-  frame and ask for one. It is
-  `ordered: true` anyway, because a reordered packet is one the client drops,
-  and a dropped packet is a hole the next delta references. Packets are
-  fragmented at 16 KB because browsers disagree about the largest SCTP message
-  they will reassemble.
-- **Loss looks like blockiness, not like corruption.** A resync forces an IDR,
-  and strict CBR with a one-frame VBV gives an IDR no more bits than a P-frame,
-  so it lands visibly blocky. Chase the loss rate, not the decoder.
-- **The transport is a UI selector, defaulting to the WebSocket**, with round
-  trip and received bitrate on the stats panel. Both real sessions on the data
-  channel went backwards for reasons loopback cannot show; measure, do not guess.
 - **Acks carry the sequence number, and the window is `seq_no - acked`.**
-  Decrementing a counter per ack is only correct when nothing can be lost: on
-  the data channel each loss leaked a slot until the pump stopped entirely.
-  `test_webrtc` drops one ack in four and fails if throughput collapses.
+  Decrementing a counter per ack leaks a slot whenever an ack does not arrive --
+  a frame the decoder rejects is enough -- and a few of those stop the pump for
+  good. The client acks *before* it decodes, for the same reason.
+- **A forced IDR is a visibly blocky frame**, because strict CBR with a
+  one-frame VBV gives it no more bits than a P-frame. If something starts
+  demanding key frames, that is what it will look like.
+- WebRTC was built and removed; `PLAN.md` has the numbers. Do not re-add aiortc
+  without reading them -- it paces badly over a real round trip, and loopback
+  cannot show it.
 - Strict CBR (`vbvbufsize`) is deliberate. Without it NVENC overshoots the
   target ~16% on real footage, and the peak frame doubles, which costs latency.
 
