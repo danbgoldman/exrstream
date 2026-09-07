@@ -387,12 +387,42 @@ Note the 4K decode figures are page-cache-warm. Cold from disk is an I/O
 question -- 24 fps of uncompressed 4K is 1.27 GB/s sustained -- and has not
 been measured.
 
-## Phase 2 — when something actually annoys you
+## Phase 2 — ranked by evidence
 
-- Disk mezzanine + nvdec (long sequences, cold-open time).
-- WebRTC transport (bad links, real congestion control).
-- More pipeline stages — server tensor ops plus a control in the UI.
-- A/B compare, channel isolation, false colour, alpha checkerboard.
+Phase 1 works and is committed. These are ordered by how much measurement backs
+them, not by appeal.
+
+1. **WebRTC transport.** The only item with a measured defect behind it: with
+   arrival gaps at 33 ms p50, Phase 1 saw occasional 280 ms stalls and one of
+   2.1 s. That is TCP head-of-line blocking, and buffering only hides it by
+   paying latency — it cannot remove it. WebRTC can drop a late packet instead
+   of stalling the stream behind it. Off-the-shelf (pion, GStreamer
+   `webrtcbin`), just much more machinery than a WebSocket.
+2. **Negotiate frame rate automatically.** The client already measures its
+   refresh and the server already warns when the rate cannot be presented
+   evenly, but choosing the rate is still manual. NVENC's `Reconfigure` makes
+   changing it mid-session cheap. Offer resampling explicitly, never as a
+   default — it alters motion timing, which is a lie about the footage.
+3. **Cold 4K I/O — measure before building anything.** Every decode figure so
+   far is page-cache-warm. Sustained 24 fps of uncompressed 4K is **1.27 GB/s**,
+   and that is the most likely place 4K quietly falls short on a real footage
+   store. Cheap to measure, and it decides whether item 6 is needed at all.
+4. **More than ~3 concurrent viewers.** All sessions share one event loop and
+   one GL context, so encodes serialise: 3 concurrent 2K viewers ran 21–24.5 fps
+   each and it degrades from there. Fix is a render thread per session, each
+   with its own `eglMakeCurrent`.
+5. **GL→CUDA interop.** Removes the ~19 ms host readback that dominates the 4K
+   chain (upload 2.9 ms, ACES shader 0.4 ms). Only worth it once 4K playback
+   needs the headroom; it does not today.
+6. **More pipeline stages.** Extra OCIO transforms appended to the group plus a
+   control in the UI — *not* hand-written shader code. OCIO regenerates the
+   shader and it stays correct by construction. This is the property that made
+   running OCIO's own shader worth it.
+7. **A/B compare, channel isolation, false colour, alpha checkerboard.** All
+   cheap once the above exists.
+8. **Disk mezzanine + nvdec.** Largely ruled out: EXR decode beats realtime, so
+   this is only a RAM-capacity question for sequences too long to cache. Do not
+   build it before item 3 says otherwise.
 
 ## Rejected
 

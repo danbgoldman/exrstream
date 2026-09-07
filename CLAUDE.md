@@ -4,6 +4,24 @@ Operational notes for agents and contributors. `README.md` is the human-facing
 overview; `PLAN.md` is the design and the reasoning behind it; `spike/RESULTS.md`
 is every Phase 0 measurement with the numbers that justify each decision.
 
+## Setup
+
+Neither the venv nor the dev certificate is tracked, so a fresh clone needs
+both before `--tls` will start:
+
+```bash
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -r requirements.txt
+
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+  -keyout spike/dev-key.pem -out spike/dev-cert.pem -subj "/CN=$(hostname)" \
+  -addext "subjectAltName=IP:127.0.0.1,DNS:localhost,DNS:$(hostname)"
+```
+
+Add the machine's LAN or Tailscale IP to `subjectAltName` if you will reach it
+from another host. The certificate is self-signed on purpose: browsers still
+treat a click-through https origin as secure, which is all WebCodecs needs.
+
 ## Run it
 
 ```bash
@@ -76,7 +94,13 @@ failure mode this tool has.
   `RESULTS.md`, not code to maintain or import. `spike/07_ocio_gpu.py` duplicates
   `exrstream/gl.py`'s grade and is the most likely thing to drift.
 - Not tracked, and must stay that way: `spike/dev-key.pem` (TLS private key) and
-  `spike/restart-llama.sh` (carries an API key).
+  `spike/restart-llama.sh` (carries an API key). See Setup to regenerate the
+  certificate.
+- This machine also runs a `llama-server` holding ~67 GB. Memory-heavy work
+  here (4K sequences, several viewers) needs it stopped first, and restarted
+  afterwards — `spike/restart-llama.sh` does that, and is untracked because the
+  command line carries an API key. Check with `nvidia-smi` before blaming
+  exrstream for an allocation failure.
 
 ## Requires
 
