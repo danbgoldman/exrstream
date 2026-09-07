@@ -172,6 +172,20 @@ void main(){{
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, self.out, 0)
         assert glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE
 
+        # Read back through a pixel buffer object rather than straight to client
+        # memory: 22.8ms -> 8.4ms for a whole 4K grade, because glReadPixels into
+        # a PBO is a GPU-side transfer the driver can DMA, where glReadPixels to
+        # a client pointer stalls the pipeline and copies row by row.
+        self.nbytes = w * h * 4
+        self.pbo = glGenBuffers(1)
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, self.pbo)
+        glBufferData(GL_PIXEL_PACK_BUFFER, self.nbytes, None, GL_STREAM_READ)
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0)
+        # Reused, not reallocated: 35 MB a frame at 4K is 1 GB/s of churn. Safe
+        # because the caller encodes before asking for the next frame, and the
+        # whole pump is one thread.
+        self._buf = np.empty((h, w, 4), np.uint8)
+
         glUniform1i(glGetUniformLocation(self.prog, "img"), 0)
         glUniform2f(glGetUniformLocation(self.prog, "res"), float(w), float(h))
         self._ev_prop = self.desc.getDynamicProperty(ocio.DYNAMIC_PROPERTY_EXPOSURE)
@@ -225,14 +239,21 @@ void main(){{
         glUseProgram(self.prog)
         glBindVertexArray(self.vao)
         glDrawArrays(GL_TRIANGLES, 0, 3)
-        # ponytail: readback to host, ~19ms at 4K -- it dominates a chain whose
-        # other stages are 2.9ms upload and 0.4ms shader. Reading RGB is 8x
-        # faster but the CPU pad back to 4 channels gives it all back, so there
-        # is no win on this side of the bus. Upgrade to GL->CUDA interop feeding
-        # NVENC a device pointer when 4K playback needs headroom; unnecessary
-        # for the 200ms slider budget.
-        buf = glReadPixels(0, 0, self.w, self.h, GL_BGRA, GL_UNSIGNED_BYTE)
-        return np.frombuffer(buf, np.uint8).reshape(self.h, self.w, 4)
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, self.pbo)
+        glReadPixels(0, 0, self.w, self.h, GL_BGRA, GL_UNSIGNED_BYTE,
+                     ctypes.c_void_p(0))
+        ptr = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, self.nbytes, GL_MAP_READ_BIT)
+        # ponytail: one host copy, 2.7ms at 4K. It is here because NVENC has to
+        # own the pixels past the unmap, and the buffer cannot stay mapped
+        # across a render. Removing it means either GL_MAP_PERSISTENT_BIT (GL
+        # 4.4; this context is 4.3) or handing NVENC a device pointer -- which
+        # is measured, works, and is byte-identical, but PyNvVideoCodec rejects
+        # every __cuda_array_interface__ object on this platform. See PLAN.md.
+        np.copyto(self._buf, np.ctypeslib.as_array(
+            ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8)), (self.h, self.w, 4)))
+        glUnmapBuffer(GL_PIXEL_PACK_BUFFER)
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0)
+        return self._buf
 
 
 _pool = {}

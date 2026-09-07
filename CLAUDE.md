@@ -81,6 +81,10 @@ failure mode this tool has.
   output transform lives on the **view**, via `DisplayViewTransform`.
 - `glReadPixels(GL_BGRA)` on an RGBA framebuffer lands as B,G,R,A, which *is*
   NVENC's ARGB. Do not also swizzle in the shader; the two cancel.
+- Read back through a PBO, never straight to client memory: 4K grade 22.6 ms vs
+  7.2 ms. And do not try to hand NVENC a device pointer instead --
+  `PyNvVideoCodec` rejects every `__cuda_array_interface__` object on this
+  platform in every published version; `PLAN.md` has the evidence.
 - Upload textures as RGBA, never RGB: a 3-component upload makes the driver
   repack every row, 1.06 GB/s vs 21 GB/s.
 - Decode concurrency is measured **cold**, not warm. Warm, PIZ flattens past ~4

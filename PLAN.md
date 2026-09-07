@@ -138,7 +138,7 @@ the source.
 | stage | budgeted | **measured** |
 |-------|----------|--------------|
 | slider → server | RTT/2, 20–40 ms | — |
-| grade + encode (GPU, from RAM cache) | 5–10 ms | **2.6 ms (2K) / 22 ms (4K)** |
+| grade + encode (GPU, from RAM cache) | 5–10 ms | **2.7 ms (2K) / 10.3 ms (4K)** |
 | transmit one frame @ 15 Mbps | ~30 ms | — |
 | network → client | RTT/2 | — |
 | WebCodecs decode + present | 10–30 ms | not yet measured |
@@ -149,10 +149,10 @@ margin disappears if any stage touches disk, which is the argument for the RAM
 cache.
 
 Within that, the ACES shader itself is 0.12 ms at 2K and 0.42 ms at 4K —
-essentially free. The cost is bus traffic: upload 2.9 ms and readback 19 ms at
-4K. Reading back to host is the only real inefficiency left, and GL→CUDA
-interop (feeding NVENC a device pointer directly) removes it if 4K playback
-ever needs headroom. It does not today: 4K sustains 45 fps, nearly 2× realtime.
+essentially free. The cost is bus traffic: upload 4.5 ms and readback 2.1 ms at
+4K, the readback having been 16 ms until it went through a pixel buffer object
+(see "Getting the frame off the GPU"). 4K now sustains **97 fps**, three times
+realtime, against 45 fps before.
 
 ### The presentation clock, and why the slider must not touch it
 
@@ -432,9 +432,10 @@ them, not by appeal.
    one GL context, so encodes serialise: 3 concurrent 2K viewers ran 21–24.5 fps
    each and it degrades from there. Fix is a render thread per session, each
    with its own `eglMakeCurrent`.
-5. **GL→CUDA interop.** Removes the ~19 ms host readback that dominates the 4K
-   chain (upload 2.9 ms, ACES shader 0.4 ms). Only worth it once 4K playback
-   needs the headroom; it does not today.
+5. ~~**GL→CUDA interop.**~~ **Done, by a different route.** A pixel buffer
+   object gets most of the win with none of the machinery: 4K grade 22.6 → 7.2
+   ms, grade+encode 10.3 ms, a 97 fps ceiling. True zero-copy is blocked on
+   PyNvVideoCodec, not on us — see "Getting the frame off the GPU".
 6. **More pipeline stages.** Extra OCIO transforms appended to the group plus a
    control in the UI — *not* hand-written shader code. OCIO regenerates the
    shader and it stays correct by construction. This is the property that made
@@ -492,6 +493,48 @@ bits on repeated frames, so each frame gets 62.5 KB where it used to get 78 KB
 at 15 Mbps. The repeats are not entirely wasted — NVENC refines the same
 picture, improving the reference for the next distinct frame — but quality at a
 given bitrate is lower than it was. Raise `--mbps` if it shows.
+
+## Getting the frame off the GPU
+
+The ACES shader is 0.58 ms at 4K. Everything else in the chain was bus traffic,
+and reading the result back to host memory was 16 ms of it — 70% of the frame.
+
+**A pixel buffer object removes most of it.** `glReadPixels` into a PBO is a
+transfer the driver can DMA; `glReadPixels` to a client pointer stalls the
+pipeline and copies row by row. Map the PBO, copy once into a reused array,
+unmap:
+
+| 4096×2160 | before | after |
+|-----------|--------|-------|
+| whole grade | 22.6 ms | **7.2 ms** |
+| grade + encode | ~22 ms | **10.3 ms** |
+| ceiling | 45 fps | **97 fps** |
+
+2K goes 2.3 → 2.0 ms, which matters much less; this is a 4K fix. `test_grade`
+covers it without knowing about it, since it compares the shipped grade against
+OCIO's CPU processor and a broken readback fails that.
+
+**True zero-copy works and cannot be used.** Registering the PBO with
+`cuGraphicsGLRegisterBuffer` and handing NVENC the mapped device pointer takes
+the grade to **5.6 ms** and is byte-identical to the host path — measured, not
+assumed. It is unusable because `PyNvVideoCodec` refuses every
+`__cuda_array_interface__` object:
+
+```
+Error Type : incorrect usage of CPU input buffer   at PyNvEncoder.cpp:731
+```
+
+That is with `usecpuinputbuffer=False`, with and without an explicit
+`cudacontext`, for CuPy arrays and hand-rolled wrappers alike, in every shape
+and pixel format, through all three `Encode` overloads, and on **every
+published version from 2.0.0 to 2.2.2**. So it is the wheel's device-input path
+on this platform, not a version regression and not our call site. The remaining
+2.7 ms is one host copy, which also needs NVENC to own the pixels past the
+unmap — `GL_MAP_PERSISTENT_BIT` would avoid it but wants GL 4.4 and this
+context is 4.3.
+
+Worth retrying when PyNvVideoCodec updates; the GL half is proven and is six
+lines away.
 
 ## WebRTC, measured and rejected
 
