@@ -1,0 +1,267 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>exrstream</title>
+<style>
+  :root { color-scheme: dark; --bg:#0e0e10; --panel:#17171a; --line:#2a2a30;
+          --fg:#dcdce0; --dim:#8a8a94; --accent:#7ecfc0; --warn:#e0b46a; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:13px/1.5 system-ui,-apple-system,sans-serif; }
+  header, footer { background:var(--panel); border-color:var(--line); }
+  header { padding:8px 12px; display:flex; gap:14px; align-items:center;
+           flex-wrap:wrap; border-bottom:1px solid var(--line); }
+  footer { padding:8px 12px; border-top:1px solid var(--line); }
+  label { display:flex; gap:6px; align-items:center; white-space:nowrap; }
+  select, button { background:#202026; color:var(--fg); border:1px solid var(--line);
+                   border-radius:5px; padding:4px 9px; font:inherit; }
+  button { cursor:pointer; } button:hover { background:#2a2a33; }
+  button:disabled { opacity:.4; cursor:default; }
+  input[type=range] { accent-color:var(--accent); }
+  #ev { width:220px; } #tl { width:100%; }
+  .k { color:var(--accent); font-variant-numeric:tabular-nums; }
+  .dim { color:var(--dim); }
+  #warn { color:var(--warn); padding:6px 12px; background:#241f14;
+          border-bottom:1px solid var(--line); display:none; }
+  #stage { display:flex; justify-content:center; align-items:center;
+           background:#000; min-height:40vh; }
+  canvas { display:block; max-width:100%; max-height:78vh; height:auto; }
+  #stats { font-family:ui-monospace,SFMono-Regular,monospace; white-space:pre;
+           color:var(--dim); font-size:12px; margin-top:6px; display:none; }
+  #load { position:fixed; inset:0; background:#0e0e10ee; display:none;
+          align-items:center; justify-content:center; flex-direction:column; gap:10px; }
+  #bar { width:280px; height:4px; background:#2a2a30; border-radius:2px; overflow:hidden; }
+  #barf { height:100%; width:0; background:var(--accent); }
+</style>
+
+<header>
+  <select id="seq"><option value="">— sequence —</option></select>
+  <button id="play" disabled>play</button>
+  <button id="prev" disabled>◀</button>
+  <button id="next" disabled>▶</button>
+  <label>exposure
+    <input id="ev" type="range" min="-10" max="10" step="0.01" value="0">
+    <span id="evv" class="k">+0.00</span></label>
+  <button id="evr">reset</button>
+  <label>in <select id="src"></select></label>
+  <label>view <select id="view"></select></label>
+  <label>fps <select id="fps">
+    <option>23.976</option><option selected>24</option><option>25</option>
+    <option>29.97</option><option>30</option><option>48</option><option>60</option>
+  </select></label>
+  <span id="conn" class="dim">connecting…</span>
+  <button id="statsb">stats</button>
+</header>
+<div id="warn"></div>
+<div id="stage"><canvas id="c"></canvas></div>
+<footer>
+  <input id="tl" type="range" min="0" max="0" step="1" value="0" disabled>
+  <div><span id="pos" class="k">–</span> <span class="dim" id="meta"></span></div>
+  <div id="stats"></div>
+</footer>
+<div id="load"><div id="barf-wrap"><div id="bar"><div id="barf"></div></div></div>
+  <div id="loadtxt" class="dim">loading…</div></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const cv = $("#c"), ctx = cv.getContext("2d", { alpha:false, desynchronized:true });
+
+if (!window.VideoDecoder) {
+  document.body.innerHTML = `<div style="padding:24px;line-height:1.7">
+    <h2>WebCodecs unavailable</h2>
+    <p><code>VideoDecoder</code> is undefined. secureContext=<b>${window.isSecureContext}</b>,
+    origin <code>${location.origin}</code>.</p>
+    <p>WebCodecs requires a secure context. <code>localhost</code> counts; a bare LAN or
+    Tailscale IP over http does not. Use https (self-signed is fine) or forward the port.</p></div>`;
+  throw new Error("no WebCodecs");
+}
+
+let ws, dec, info = null, ready = null;
+let epoch = 0, pending = null, playing = false, frameIdx = 0;
+// Playback drains a queue on a clock; the slider bypasses it while paused.
+// Painting on arrival is what makes the slider instant and playback judder.
+const q = []; let TARGET_Q = 6, nextPresent = 0, underruns = 0;
+const lat = [], gaps = [], paintGaps = [], rafGaps = [], idleRaf = [];
+let lastArrival = 0, lastPaint = 0, lastRaf = 0, lastStats = 0, painted = 0;
+
+const pct = (a,p) => a.length ? [...a].sort((x,y)=>x-y)[Math.min(a.length-1,Math.floor(a.length*p/100))] : NaN;
+
+function paint(frame) {
+  const ep = frame.timestamp;
+  if (pending && ep >= pending.epoch) {
+    lat.push(performance.now() - pending.t0);
+    if (lat.length > 200) lat.shift();
+    pending = null;
+  }
+  if (cv.width !== frame.displayWidth) { cv.width = frame.displayWidth; cv.height = frame.displayHeight; }
+  ctx.drawImage(frame, 0, 0);
+  frame.close();
+  painted++;
+  const t = performance.now();
+  if (lastPaint && playing) { paintGaps.push(t - lastPaint); if (paintGaps.length > 300) paintGaps.shift(); }
+  lastPaint = t;
+}
+const flushQ = () => { while (q.length) q.shift().close(); };
+
+function tick(ts) {
+  requestAnimationFrame(tick);
+  if (lastRaf) {
+    const g = ts - lastRaf;
+    (playing ? rafGaps : idleRaf).push(g);
+    if (rafGaps.length > 300) rafGaps.shift();
+    if (idleRaf.length > 240) idleRaf.shift();
+  }
+  lastRaf = ts;
+  if (!playing || !ready) { if (ts - lastStats > 400) { lastStats = ts; stats(); } return; }
+
+  // Adaptive period: the server clock and this clock always drift, and a fixed
+  // buffer erodes to empty, after which every jitter spike underruns.
+  const nominal = 1000 / ready.fps;
+  const err = (TARGET_Q - q.length) / Math.max(TARGET_Q, 1);
+  const period = nominal * (1 + Math.max(-0.10, Math.min(0.10, 0.06 * err)));
+
+  // A deadline already in the past cannot catch up one period at a time; it
+  // would paint on every refresh and drain the queue at refresh rate.
+  if (nextPresent && ts - nextPresent > 2 * period) nextPresent = ts;
+  if (!nextPresent) { if (q.length >= TARGET_Q) nextPresent = ts; else return; }
+  if (ts >= nextPresent) {
+    if (q.length) { paint(q.shift()); nextPresent += period; }
+    else { underruns++; nextPresent += period; }
+  }
+  if (ts - lastStats > 250) { lastStats = ts; stats(); }
+}
+requestAnimationFrame(tick);
+
+function stats() {
+  $("#pos").textContent = ready ? `frame ${frameIdx + 1} / ${ready.frames}` : "–";
+  $("#meta").textContent = ready
+    ? `· ${ready.w}×${ready.h} · ${ready.fps} fps · ${ready.src} → ${ready.view} · cache ${ready.cache_gb} GB`
+    : "";
+  if ($("#stats").style.display === "none") return;
+  const hz = a => a.length ? (1000/pct(a,50)).toFixed(0) : "–";
+  $("#stats").textContent =
+`slider → pixels  p50 ${pct(lat,50).toFixed(1)}  p95 ${pct(lat,95).toFixed(1)} ms   n=${lat.length}
+arrival gap      p50 ${pct(gaps,50).toFixed(1)}  p95 ${pct(gaps,95).toFixed(1)}  max ${gaps.length?Math.max(...gaps).toFixed(0):"–"} ms
+paint gap        p50 ${pct(paintGaps,50).toFixed(1)}  p95 ${pct(paintGaps,95).toFixed(1)} ms   target ${ready?(1000/ready.fps).toFixed(1):"–"}
+rAF   playing ${hz(rafGaps)} Hz   idle ${hz(idleRaf)} Hz
+buffer ${TARGET_Q}   queue ${q.length}   underruns ${underruns}   painted ${painted}`;
+}
+
+function setupDecoder() {
+  if (dec) { try { dec.close(); } catch (e) {} }
+  dec = new VideoDecoder({
+    output: f => {
+      const now = performance.now();
+      if (lastArrival) { gaps.push(now - lastArrival); if (gaps.length > 300) gaps.shift(); }
+      lastArrival = now;
+      if (!playing) { flushQ(); paint(f); stats(); return; }
+      q.push(f);
+      if (q.length > TARGET_Q + 6) paint(q.shift());
+    },
+    error: e => { $("#conn").textContent = "decoder error"; console.error(e); }
+  });
+  // No `description` => annex-b, which is what NVENC emits (with repeatspspps).
+  dec.configure({ codec: info.codec, optimizeForLatency: true });
+}
+
+function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+
+function connect() {
+  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => { $("#conn").textContent = "connected"; $("#conn").className = "k"; };
+  ws.onclose = () => { $("#conn").textContent = "disconnected"; $("#conn").className = "dim"; };
+  ws.onmessage = ev => {
+    if (typeof ev.data !== "string") return onFrame(ev.data);
+    const m = JSON.parse(ev.data);
+    if (m.type === "sequences") {
+      info = m;
+      for (const it of m.items) {
+        const o = document.createElement("option");
+        o.value = it.key;
+        o.textContent = `${it.name} — ${it.frames}f ${it.w}×${it.h} (${(it.bytes/2**30).toFixed(1)} GB)`;
+        $("#seq").append(o);
+      }
+      for (const cs of m.colorspaces) $("#src").append(new Option(cs, cs, cs === "ACEScg", cs === "ACEScg"));
+      for (const v of m.views) $("#view").append(new Option(v, v));
+      setupDecoder();
+    } else if (m.type === "loading") {
+      $("#load").style.display = "flex";
+      $("#barf").style.width = `${100 * m.done / m.total}%`;
+      $("#loadtxt").textContent = `decoding ${m.done} / ${m.total} frames`;
+    } else if (m.type === "ready") {
+      $("#load").style.display = "none";
+      ready = m; frameIdx = m.first;
+      $("#tl").max = m.frames - 1; $("#tl").value = 0; $("#tl").disabled = false;
+      for (const b of ["play","prev","next"]) $("#"+b).disabled = false;
+      $("#fps").value = String(m.fps);
+      setupDecoder();
+      const bad = (m.bad && m.bad.length)
+        ? `${m.bad.length} frame(s) unreadable and shown black (first at ${m.bad[0]}). `
+        : "";
+      note(bad + (m.note || "") || null);
+      stats();
+    } else if (m.type === "note") { note(m.note); }
+    else if (m.type === "error") {
+      $("#load").style.display = "none";
+      $("#warn").style.display = "block";
+      $("#warn").textContent = "⚠ " + m.msg;
+    }
+  };
+}
+
+function note(text) {
+  $("#warn").style.display = text ? "block" : "none";
+  if (text) $("#warn").textContent = "⚠ " + text;
+}
+
+function onFrame(buf) {
+  const dv = new DataView(buf);
+  frameIdx = dv.getUint32(0, true);
+  const ep = dv.getUint32(4, true), isKey = dv.getUint32(12, true) === 1;
+  try {
+    dec.decode(new EncodedVideoChunk({
+      type: isKey ? "key" : "delta", timestamp: ep, data: new Uint8Array(buf, 16) }));
+  } catch (e) { console.error(e); return; }
+  if (!playing) $("#tl").value = frameIdx;
+  send({ type:"ack", frame: frameIdx });
+}
+
+$("#seq").onchange = e => { if (e.target.value) send({ type:"open", key:e.target.value }); };
+function sendEv(v, final) {
+  $("#evv").textContent = (v>=0?"+":"") + v.toFixed(2);
+  epoch++; pending = { epoch, t0: performance.now() };
+  send({ type:"exposure", ev:v, epoch, final });
+}
+$("#ev").oninput  = e => sendEv(+e.target.value, false);
+// change fires on release: the one event that must flush NVENC's pipeline so
+// the final value is what the viewer is actually looking at.
+$("#ev").onchange = e => sendEv(+e.target.value, true);
+$("#evr").onclick = () => { $("#ev").value = 0; sendEv(0, true); };
+$("#play").onclick = () => {
+  playing = !playing;
+  if (!playing) { flushQ(); nextPresent = 0; }
+  $("#play").textContent = playing ? "pause" : "play";
+  send({ type:"play", on: playing });
+};
+const step = d => { if (playing) $("#play").onclick(); send({ type:"step", delta:d }); };
+$("#prev").onclick = () => step(-1);
+$("#next").onclick = () => step(1);
+$("#tl").oninput = e => { if (playing) $("#play").onclick(); send({ type:"seek", frame:+e.target.value }); };
+$("#fps").onchange = e => send({ type:"fps", fps:+e.target.value });
+$("#src").onchange = e => send({ type:"look", src:e.target.value });
+$("#view").onchange = e => send({ type:"look", view:e.target.value });
+$("#statsb").onclick = () => {
+  const s = $("#stats"); s.style.display = s.style.display === "none" ? "block" : "none"; stats();
+};
+addEventListener("keydown", e => {
+  if (e.target.tagName === "SELECT" || e.target.tagName === "INPUT") return;
+  if (e.code === "Space") { e.preventDefault(); $("#play").onclick(); }
+  else if (e.code === "ArrowLeft") step(-1);
+  else if (e.code === "ArrowRight") step(1);
+});
+
+// Measure the display refresh before a sequence is picked, so the server can
+// warn about a rate the display cannot present evenly.
+setTimeout(() => send({ type:"hello", refreshHz: idleRaf.length ? 1000/pct(idleRaf,50) : 0 }), 1500);
+connect();
+</script>
