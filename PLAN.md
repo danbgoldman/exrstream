@@ -447,6 +447,68 @@ them, not by appeal.
    realtime cold as well as warm. What remains is only a RAM-capacity question
    for sequences too long to cache, which is a different feature.
 
+## Phase 3 — the viewer as an instrument
+
+Phase 1 and 2 built a correct picture and put every control in one row above it.
+That row is now the least considered part of the tool. These are cosmetic in the
+sense that none of them changes a pixel, and not cosmetic in the sense that a
+review tool is mostly the experience of scrubbing and comparing.
+
+1. **Transport controls move below the picture**, with the frame rate selector,
+   and take standard glyphs: ⏮ ◀ ⏵/⏸ ▶ ⏭. Controls under the image is what every
+   player does, and it puts them next to the timeline they act on. What is left
+   above is what changes the *picture* — sequence, colourspace, view — which is
+   a real distinction rather than a tidy-up: the top row alters what you are
+   looking at, the bottom row alters where you are in it.
+
+2. **Drop "match display"; warn instead when the display cannot keep up.**
+   Resampling is the one control that lies about motion, and since the stream
+   rate already repeats frames to hold the sequence at its own speed, it exists
+   only to make things smooth by making them wrong. Removing it removes the
+   only way to see this footage play smoothly-but-fast, deliberately.
+
+   "Cannot keep up" needs a precise meaning, and it is not the same as "cannot
+   present evenly": 24 fps on 30 Hz presents unevenly and is handled honestly by
+   repeats, with nothing to warn about. The case that deserves a warning is
+   `out_fps < src_fps` — the refresh is *below* the sequence rate, so frames are
+   being dropped and you are not seeing the cut. Say which rate the display can
+   actually sustain, and that the footage is not being shown in full.
+
+3. **Delete the wipe slider.** The seam is dragged on the picture; a second
+   control for the same value is a thing to keep in sync for no benefit.
+
+4. **A and B become the same control row, twice.** `sequence · in · view` on
+   each side, identical widgets, and the compare toggle goes away: B's sequence
+   pulldown gains an empty entry, and *B set* is what "compare" means. Empty
+   greys out B's look controls and disables wiping. One less piece of state, and
+   the state that remains is visible rather than inferred from a highlighted
+   button. Server side, `compare` stops being a field and becomes
+   `frames_b is not None`; clearing B needs an unbind path, which does not exist
+   yet.
+
+5. **Stats becomes a cog.** It is a settings/diagnostics affordance, not a noun.
+
+6. **Pan and zoom on the canvas**, with a reset button beside the transport
+   controls. Drag to pan, wheel to zoom, ctrl+wheel for trackpad pinch.
+
+   **This collides with item 3, and the collision is the whole design problem:**
+   drag now means both "move the wipe" and "pan". The standard answer, and the
+   one to take, is that the seam has a grab zone — a drag starting within a few
+   pixels of it moves the wipe, anything else pans. It also means the seam
+   wants to be visible enough to aim at, which the current 1px-ish line
+   already manages.
+
+   **Known ceiling, worth stating before it surprises someone:** a client-side
+   zoom magnifies *decoded video*, not the EXR. Push into a highlight at 4:1 and
+   you are looking at interpolated 8-bit 4:2:0, which is exactly the kind of
+   confident-but-wrong answer this tool exists to avoid. It is still worth
+   having — framing and composition do not need source pixels — but real pixel
+   inspection means rendering a server-side region of interest at native
+   resolution, which is a different feature and belongs in its own item. Label
+   the zoom factor in the UI so it is never ambiguous which one you are getting.
+
+Not in Phase 3: server-side ROI zoom (above), and anything that changes colour.
+
 ## Two rates, and why they are not the same number
 
 Phase 0 found that 24 fps on a 30 Hz display cannot be presented evenly and
