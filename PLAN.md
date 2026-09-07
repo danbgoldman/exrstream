@@ -587,6 +587,60 @@ context is 4.3.
 Worth retrying when PyNvVideoCodec updates; the GL half is proven and is six
 lines away.
 
+## On other hardware: an estimate, not a measurement
+
+Everything here was measured on a GB10, which has **unified memory**. That is
+load-bearing in a way it is easy to miss, because two stages of the chain are
+host transfers that happen to be nearly free on this machine and would cross
+PCIe on a discrete card. Nothing below has been run on one.
+
+Per-stage cost at 4096x2160, measured:
+
+| stage | bytes | GB10 | rate |
+|-------|-------|------|------|
+| upload half → texture | 71 MB | 3.26 ms | 21.7 GB/s |
+| ACES shader | — | 0.58 ms | — |
+| fbo → PBO | 35 MB | 0.64 ms | 55.5 GB/s |
+| map + host copy | 35 MB | 1.17 ms | 30.2 GB/s |
+
+Those rates *are* the unified memory. On an RTX A6000 (Ampere, PCIe 4.0 x16,
+768 GB/s of GDDR6) the chain splits in two directions:
+
+- **Faster:** the shader, on nearly 3x the memory bandwidth — perhaps 0.3 ms.
+  And `fbo → PBO`, which stays entirely in VRAM instead of crossing shared
+  memory at 55 GB/s: well under 0.2 ms.
+- **Slower:** both host crossings. `glTexSubImage2D` from a pageable numpy array
+  is the textbook slow PCIe upload, 6–12 GB/s realistic, so 71 MB becomes 6–12
+  ms. `glMapBufferRange` on a PBO that now lives in VRAM forces a real
+  device→host DMA, so map+copy becomes maybe 3–6 ms. Then NVENC copies that host
+  buffer *back* across PCIe, which is nearly free here and another 2–4 ms there.
+
+Estimate: **4K grade+encode 15–25 ms against 10.3 ms here**, so the ceiling
+falls from 97 fps to roughly 40–65. Still above the 30 fps a client negotiates,
+but the headroom halves. 2K would be 5–7 ms and uninteresting.
+
+Three things that change what you would actually do:
+
+1. **The blocked GL→CUDA interop stops being a nicety.** Here it saves 2.7 ms.
+   There it removes *two* PCIe crossings and roughly halves the 4K frame cost,
+   so `PyNvVideoCodec`'s broken device-input path becomes the main thing between
+   you and 2x at 4K rather than a footnote.
+2. **AV1 is gone.** Ampere has no AV1 encoder; that arrived with Ada. The codec
+   section above prefers AV1 on this hardware — on an A6000 the choice is HEVC.
+   This is the one hard functional difference rather than a performance one.
+3. **Upload wants a PBO too**, which it does not here: 21.7 GB/s is already
+   near memory speed, so staging it buys nothing on a GB10 and is the classic
+   2x win from pageable memory over PCIe. First change to make.
+
+Two things get better. The frame cache stops competing with the GPU for the same
+physical memory, which on a GB10 it does — 40 GB of cache and the grade are
+drawing on one pool. And cold EXR I/O, the 1.27 GB/s at 24 fps, is a storage
+question that does not care what card is fitted.
+
+Less certain than the rest: NVENC engine count on GA102. One, most likely, the
+same as here, so the ~20-concurrent-2K-viewer ceiling would not move — but that
+is worth checking rather than trusting.
+
 ## WebRTC, measured and rejected
 
 WebRTC was top of the Phase 2 list for one measured reason — TCP head-of-line

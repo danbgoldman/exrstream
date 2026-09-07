@@ -133,5 +133,8 @@ failure mode this tool has.
 ## Requires
 
 NVIDIA GPU with NVENC and a GPU-capable EGL driver (no X server needed).
-Developed on a GB10 (aarch64). Every dependency installs from a wheel;
+Developed on a GB10 (aarch64), whose **unified memory makes the two host
+transfers in the grade nearly free** -- on a discrete card they cross PCIe, and
+every timing in this file and in `PLAN.md` is from the unified case. `PLAN.md`
+has the per-stage bytes and rates and an estimate for a discrete GPU. Every dependency installs from a wheel;
 **ffmpeg is not used anywhere** — PyNvVideoCodec talks to NVENC directly.

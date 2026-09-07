@@ -113,7 +113,8 @@ so length is bounded by memory rather than disk. Tested with several
 simultaneous viewers, each with independent controls, not with a large audience.
 
 Requires an NVIDIA GPU with a hardware video encoder. Developed on an NVIDIA
-GB10; ffmpeg is not used anywhere.
+GB10; ffmpeg is not used anywhere. The GB10's unified memory flatters two stages
+of the pipeline, so `PLAN.md` estimates what a discrete card would cost.
 
 ## Credits
 
