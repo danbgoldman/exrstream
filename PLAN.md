@@ -372,8 +372,9 @@ Four things synthetic content hid:
    exactly *and* caps peak frame size 1.40 -> 0.63 Mbit, which halves worst-case
    transmit time, so it buys latency as well. `maxbitrate` does nothing.
 2. **Decode threading advice was backwards for uncompressed footage.** PIZ/ZIP
-   flattens past ~4 workers (memory-bandwidth bound); uncompressed 4K needs 8+
-   just to beat realtime. Hence `--workers 8`.
+   flattens past ~4 workers *warm* (memory-bandwidth bound); uncompressed 4K
+   needs 8+ just to beat realtime. Hence `--workers 8`. Cold from disk the
+   flattening does not happen at all — see Phase 2 item 3.
 3. **Frames that cannot be read must not sink the sequence.** A render still
    being written -- or, here, a half-downloaded file -- now renders black with
    the count and position reported, rather than failing the whole load or being
@@ -383,9 +384,29 @@ Four things synthetic content hid:
    ACES, then to Rec.709 scene-linear for the movie pipeline. Hence `--src`,
    and the per-session selector in the UI.
 
-Note the 4K decode figures are page-cache-warm. Cold from disk is an I/O
-question -- 24 fps of uncompressed 4K is 1.27 GB/s sustained -- and has not
-been measured.
+### Cold from disk, measured
+
+The figures above are page-cache-warm. Cold (`posix_fadvise(DONTNEED)` on every
+file first), 48 frames of uncompressed 4K through `FrameCache.load`:
+
+| workers | cold open | fps | GB/s |
+|---------|-----------|-----|------|
+| 1 | 4.62 s | 10.4 | 0.55 |
+| 4 | 1.53 s | 31.4 | 1.67 |
+| 8 | **0.95 s** | **50.3** | **2.67** |
+| 16 | 0.79 s | 60.7 | 3.22 |
+
+Realtime is 1.27 GB/s. **A single reader gets 1.24 GB/s of raw sequential read
+and 0.55 GB/s through the decoder — both under it.** Concurrency is what buys
+the margin, and it is queue depth doing the work, not CPU: raw `read()` with no
+decoding at all is only 1.24 GB/s cold against 12.5 GB/s warm.
+
+So `--workers` is load-bearing cold in a way it was not warm, and it helps PIZ
+too (HD cold: 42 fps at 1 worker, 164 at 8) — the "flattens past ~4" advice was
+a warm-cache artefact. Diminishing past 8, which stays the default.
+
+This also settles the item it was there to gate: **the disk mezzanine is not
+needed.** Cold 4K decode is 2× realtime.
 
 ## Phase 2 — ranked by evidence
 
@@ -403,10 +424,12 @@ them, not by appeal.
    evenly, but choosing the rate is still manual. NVENC's `Reconfigure` makes
    changing it mid-session cheap. Offer resampling explicitly, never as a
    default — it alters motion timing, which is a lie about the footage.
-3. **Cold 4K I/O — measure before building anything.** Every decode figure so
-   far is page-cache-warm. Sustained 24 fps of uncompressed 4K is **1.27 GB/s**,
-   and that is the most likely place 4K quietly falls short on a real footage
-   store. Cheap to measure, and it decides whether item 6 is needed at all.
+3. ~~**Cold 4K I/O**~~ — **done**, and it found a real defect: `FrameCache.load`
+   decoded serially, so `--workers` only ever parallelised *across* sessions and
+   a cold 4K open ran at 10.4 fps (0.55 GB/s) against a 1.27 GB/s realtime
+   requirement. Decoding the frames concurrently takes it to 50.3 fps / 2.67
+   GB/s, cold-opening 48 4K frames in 0.95 s instead of 4.62 s. Numbers above.
+   It also closes item 8.
 4. **More than ~3 concurrent viewers.** All sessions share one event loop and
    one GL context, so encodes serialise: 3 concurrent 2K viewers ran 21–24.5 fps
    each and it degrades from there. Fix is a render thread per session, each
@@ -420,9 +443,9 @@ them, not by appeal.
    running OCIO's own shader worth it.
 7. **A/B compare, channel isolation, false colour, alpha checkerboard.** All
    cheap once the above exists.
-8. **Disk mezzanine + nvdec.** Largely ruled out: EXR decode beats realtime, so
-   this is only a RAM-capacity question for sequences too long to cache. Do not
-   build it before item 3 says otherwise.
+8. ~~**Disk mezzanine + nvdec.**~~ Ruled out by item 3: EXR decode beats
+   realtime cold as well as warm. What remains is only a RAM-capacity question
+   for sequences too long to cache, which is a different feature.
 
 ## Rejected
 
@@ -448,8 +471,8 @@ them, not by appeal.
 4. **Backpressure discipline.** Without it, TCP transport quietly converts a
    150 ms system into a multi-second one under load. Build it in Phase 1, not
    after the first complaint.
-5. ~~Cold-open time on 4K~~ — largely closed; 4K decodes faster than realtime
-   on one thread. Re-check on noisy renders.
+5. ~~Cold-open time on 4K~~ — closed. 2× realtime cold from disk at 8 decode
+   workers; below realtime at one, which is why `load` decodes concurrently.
 6. **EXR variety**: multi-part files, AOV layers, non-RGB channels, mismatched
    data/display windows. Phase 1 handles single-part RGB(A) and refuses the
    rest with a clear message.

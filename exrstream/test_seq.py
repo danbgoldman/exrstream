@@ -80,6 +80,22 @@ def test_mixed_resolution_refused(tmp):
         raise AssertionError("mixed resolutions must be refused, not guessed")
 
 
+def test_unreadable_frame_is_black(tmp):
+    """Parallel decode must keep frames in order and report the gap, not skip it."""
+    from exrstream.seq import FrameCache
+    for i in range(4):
+        px = np.full((4, 4, 3), (i + 1) / 10.0, np.float16)
+        _write(tmp / f"t.{i:04d}.exr", px, ["R", "G", "B"])
+    (tmp / "t.0002.exr").write_bytes(b"not an exr")   # a render still being written
+    seq = [s for s in discover(tmp) if s.nframes == 4][0]
+    c = FrameCache(workers=4)
+    frames = c.load(seq, 0, 4)
+    assert len(frames) == 4, "a bad frame must not shorten the sequence"
+    assert c.bad == [2], c.bad
+    assert float(frames[2].max()) == 0.0, "the unreadable frame must be black"
+    assert abs(float(frames[3][0, 0, 0]) - 0.4) < 1e-3, "frames arrived out of order"
+
+
 def test_discovery_groups_by_stem(tmp):
     for i in range(3):
         _write(tmp / f"shotA.{i:04d}.exr", np.zeros((2, 2, 3), np.float16), ["R", "G", "B"])
@@ -93,7 +109,7 @@ def main():
     test_channel_order()
     for fn in (test_reads_bgr_in_right_order, test_data_window_smaller_than_display,
                test_data_window_larger_than_display, test_mixed_resolution_refused,
-               test_discovery_groups_by_stem):
+               test_unreadable_frame_is_black, test_discovery_groups_by_stem):
         with tempfile.TemporaryDirectory() as d:
             fn(Path(d))
         print(f"  ok  {fn.__name__}")

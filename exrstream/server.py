@@ -332,7 +332,7 @@ def build_app(a):
                          "\n  ".join(gl.colorspaces()))
     app = web.Application()
     app["args"] = a
-    app["cache"] = FrameCache(int(a.cache_gb * (1 << 30)))
+    app["cache"] = FrameCache(int(a.cache_gb * (1 << 30)), a.workers)
     app["pool"] = ThreadPoolExecutor(a.workers)
     app["sequences"] = discover(a.root)
     app.add_routes([web.get("/", index), web.get("/ws", ws_handler),
@@ -356,9 +356,9 @@ def main():
     p.add_argument("--port", type=int, default=8099)
     p.add_argument("--cache-gb", type=float, default=40)
     p.add_argument("--workers", type=int, default=8,
-                   help="EXR decode threads. Scaling depends on compression: PIZ/ZIP "
-                        "flattens past ~4 (memory-bandwidth bound), but uncompressed "
-                        "4K needs 8+ to beat realtime (21 fps at 1 thread, 65 at 8).")
+                   help="EXR decode threads. Load-bearing cold from disk, where "
+                        "one reader manages 0.55 GB/s against the 1.27 GB/s a 4K "
+                        "sequence needs: 10.4 fps at 1, 50.3 at 8. Diminishing past 8.")
     p.add_argument("--tls", action="store_true",
                    help="serve https with spike/dev-cert.pem. WebCodecs is "
                         "[SecureContext]: VideoDecoder does not exist over plain "

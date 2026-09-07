@@ -82,6 +82,10 @@ failure mode this tool has.
   NVENC's ARGB. Do not also swizzle in the shader; the two cancel.
 - Upload textures as RGBA, never RGB: a 3-component upload makes the driver
   repack every row, 1.06 GB/s vs 21 GB/s.
+- Decode concurrency is measured **cold**, not warm. Warm, PIZ flattens past ~4
+  workers; cold, a single reader gets 0.55 GB/s against the 1.27 GB/s a 4K
+  sequence needs at 24 fps, and 8 workers get 2.67. Benchmark with
+  `posix_fadvise(DONTNEED)` or the numbers are page-cache fiction.
 - Strict CBR (`vbvbufsize`) is deliberate. Without it NVENC overshoots the
   target ~16% on real footage, and the peak frame doubles, which costs latency.
 
