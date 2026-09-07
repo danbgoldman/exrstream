@@ -153,7 +153,11 @@ class Session:
         self.view_b = self.view_b or self.view
         self.grade_b = gl.grade_for(self.w, self.h, self.src_b, gl.DISPLAY, self.view_b)
         self.compare = True
-        self.dirty = self.flush_next = self.jump = True
+        # Every `ready` makes the client build a fresh VideoDecoder, so every
+        # `ready` has to be followed by an IDR or that decoder meets a P-frame
+        # with no reference and errors out. A B-side open sends one, so it needs
+        # a fresh encoder too, even though the geometry has not changed.
+        self._make_encoder()
 
     def set_look(self, src=None, view=None, side="a"):
         if side == "b":
@@ -472,8 +476,14 @@ async def ws_handler(request):
                 except Exception as e:                        # noqa: BLE001
                     await ws.send_json({"type": "error", "msg": f"look: {e}"})
             elif t == "compare" and s.frames:
+                # Deliberately not a `ready`: that would rebuild the decoder for
+                # a change that does not need one. The client only has to learn
+                # whether compare actually took effect, which it does not if no
+                # B side ever loaded.
                 s.compare = bool(m["on"]) and s.frames_b is not None
                 s.dirty = s.jump = s.flush_next = True
+                await ws.send_json({"type": "state", "compare": s.compare,
+                                    "wipe": s.wipe})
             elif t == "wipe" and s.frames:
                 s.wipe = max(0.0, min(1.0, float(m["wipe"])))
                 s.dirty = True

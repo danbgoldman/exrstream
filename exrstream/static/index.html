@@ -29,7 +29,9 @@
           border-bottom:1px solid var(--line); display:none; }
   #stage { display:flex; justify-content:center; align-items:center;
            background:#000; min-height:40vh; }
-  canvas { display:block; max-width:100%; max-height:78vh; height:auto; }
+  canvas { display:block; max-width:100%; max-height:78vh; height:auto;
+           touch-action:none; }
+  canvas.wipeable { cursor:col-resize; }
   #stats { font-family:ui-monospace,SFMono-Regular,monospace; white-space:pre;
            color:var(--dim); font-size:12px; margin-top:6px; display:none; }
   #load { position:fixed; inset:0; background:#0e0e10ee; display:none;
@@ -92,6 +94,7 @@ if (!window.VideoDecoder) {
 
 let ws, dec, info = null, ready = null;
 let epoch = 0, pending = null, playing = false, frameIdx = 0, reportedHz = 0;
+let wipe = 0.5, dragging = false;
 // Playback drains a queue on a clock; the slider bypasses it while paused.
 // Painting on arrival is what makes the slider instant and playback judder.
 const q = []; let TARGET_Q = 6, nextPresent = 0, underruns = 0;
@@ -110,6 +113,15 @@ function paint(frame) {
   if (cv.width !== frame.displayWidth) { cv.width = frame.displayWidth; cv.height = frame.displayHeight; }
   ctx.drawImage(frame, 0, 0);
   frame.close();
+  // The handle is drawn here and not encoded into the stream: it must never
+  // become one of the pixels under review, and it costs no bitrate this way.
+  if (ready && ready.compare) {
+    const x = Math.round(wipe * cv.width), w = Math.max(1, cv.width / 1000);
+    ctx.lineWidth = w * 3; ctx.strokeStyle = "rgba(0,0,0,.45)";
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, cv.height); ctx.stroke();
+    ctx.lineWidth = w; ctx.strokeStyle = "rgba(255,255,255,.9)";
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, cv.height); ctx.stroke();
+  }
   painted++;
   const t = performance.now();
   if (lastPaint && playing) { paintGaps.push(t - lastPaint); if (paintGaps.length > 300) paintGaps.shift(); }
@@ -250,7 +262,9 @@ function connect() {
         $("#seqb").value = m.b_key;
         $("#srcb").value = m.b_src; $("#viewb").value = m.b_view;
       }
+      wipe = m.wipe;
       $("#wipe").value = String(m.wipe);
+      cv.classList.toggle("wipeable", !!m.compare);
       $("#cmpinfo").textContent = m.b_name
         ? `A ${m.name} (${m.frames}f) | B ${m.b_name} (${m.b_frames}f)` +
           (m.b_frames < m.frames ? " — B is shorter; its last frame is held" : "")
@@ -261,6 +275,9 @@ function connect() {
         : "";
       note(bad + (m.note || "") || null);
       stats();
+    } else if (m.type === "state") {
+      if (ready) Object.assign(ready, m);
+      cv.classList.toggle("wipeable", !!m.compare);
     } else if (m.type === "note") { note(m.note); }
     else if (m.type === "error") {
       $("#load").style.display = "none";
@@ -322,6 +339,32 @@ $("#fps").onchange = sendRate;
 $("#resample").onchange = sendRate;
 $("#src").onchange = e => send({ type:"look", src:e.target.value });
 $("#view").onchange = e => send({ type:"look", view:e.target.value });
+// Drag the seam on the picture itself. The canvas is letterboxed by CSS, so
+// the split comes from its rendered box, not its pixel width.
+function setWipe(v, final) {
+  wipe = Math.max(0, Math.min(1, v));
+  $("#wipe").value = String(wipe);
+  send({ type:"wipe", wipe, final });
+}
+function wipeAt(e) {
+  const r = cv.getBoundingClientRect();
+  return (e.clientX - r.left) / r.width;
+}
+cv.addEventListener("pointerdown", e => {
+  if (!ready || !ready.compare) return;
+  dragging = true;
+  cv.setPointerCapture(e.pointerId);
+  setWipe(wipeAt(e), false);
+});
+cv.addEventListener("pointermove", e => { if (dragging) setWipe(wipeAt(e), false); });
+for (const ev of ["pointerup", "pointercancel"])
+  cv.addEventListener(ev, e => {
+    if (!dragging) return;
+    dragging = false;
+    cv.releasePointerCapture(e.pointerId);
+    setWipe(wipeAt(e), true);      // the one event that must flush the encoder
+  });
+
 $("#cmpb").onclick = () => {
   const on = $("#cmp").classList.toggle("on");
   $("#cmpb").className = on ? "k" : "";
@@ -334,8 +377,8 @@ $("#seqb").onchange = e => {
 };
 $("#srcb").onchange = e => send({ type:"look", side:"b", src:e.target.value });
 $("#viewb").onchange = e => send({ type:"look", side:"b", view:e.target.value });
-$("#wipe").oninput  = e => send({ type:"wipe", wipe:+e.target.value, final:false });
-$("#wipe").onchange = e => send({ type:"wipe", wipe:+e.target.value, final:true });
+$("#wipe").oninput  = e => setWipe(+e.target.value, false);
+$("#wipe").onchange = e => setWipe(+e.target.value, true);
 $("#statsb").onclick = () => {
   const s = $("#stats"); s.style.display = s.style.display === "none" ? "block" : "none"; stats();
 };

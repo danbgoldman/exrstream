@@ -164,7 +164,13 @@ async def main(url="https://127.0.0.1:8099"):
                 assert m["type"] != "error", m
             assert m["compare"] and m["b_name"], m
             assert m["first"] == 7, f"a B-side open moved the playhead to {m['first']}"
-            print(f"  B side loaded, playhead held at {m['first']}")
+            # Every `ready` rebuilds the client's decoder, so every `ready` must
+            # be followed by a key frame or that decoder meets a P-frame with no
+            # reference and errors out.
+            (fr, ep, ev, fl, _sq), body = await next_frame()
+            assert fl == 1 and 7 in nals(body), \
+                "the frame after a B-side open must be an IDR with SPS/PPS"
+            print(f"  B side loaded, playhead held at {m['first']}, IDR sent")
 
             await ws.send_json({"type": "look", "side": "b", "view": "Un-tone-mapped"})
             await ws.send_json({"type": "wipe", "wipe": 0.25, "final": True})

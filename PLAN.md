@@ -518,6 +518,22 @@ Rules it enforces rather than guesses at, in the style of the rest of the tool:
 - **A B-side open does not move the playhead.** The point is to compare the
   frame you are already looking at.
 
+**The seam is dragged on the picture, and drawn by the client.** Server-side it
+would cost bitrate and, worse, put a drawn pixel among the pixels under review;
+`paint()` strokes it after `drawImage`, so it never touches the stream. The
+canvas is letterboxed by CSS, so the split comes from its rendered box rather
+than its pixel width. Pointer capture means the drag survives leaving the
+canvas, and the release is the one event that flushes the encoder — the same
+discipline the exposure slider uses.
+
+**An invariant worth stating, because breaking it is silent:** every `ready`
+makes the client build a fresh `VideoDecoder`, so **every `ready` must be
+followed by an IDR**, or that decoder meets a P-frame with no reference and
+errors out. A B-side open sends a `ready`, so it rebuilds the encoder even
+though the geometry has not changed. Toggling compare deliberately sends a
+lightweight `state` message instead, since it needs no new decoder.
+`test_server` checks the IDR.
+
 Costs, measured: **+0.97 ms at 2K, +3.86 ms at 4K** for the extra upload and
 draw, so 4K with a wipe is 11.1 ms of grade against a 33 ms budget. Both
 sequences are resident, so RAM is the real limit — two 4K sequences at 66 MB a
