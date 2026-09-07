@@ -86,6 +86,12 @@ failure mode this tool has.
   workers; cold, a single reader gets 0.55 GB/s against the 1.27 GB/s a 4K
   sequence needs at 24 fps, and 8 workers get 2.67. Benchmark with
   `posix_fadvise(DONTNEED)` or the numbers are page-cache fiction.
+- Frames go over a WebRTC data channel when one is up, the WebSocket otherwise,
+  and both carry the identical 20-byte header + Annex-B packet. The channel is
+  unordered with `maxRetransmits: 0` -- that is the point, not an oversight --
+  so the client must handle a missing packet: wait for a key frame and ask for
+  one. Packets are fragmented at 16 KB because browsers disagree about the
+  largest SCTP message they will reassemble.
 - Strict CBR (`vbvbufsize`) is deliberate. Without it NVENC overshoots the
   target ~16% on real footage, and the peak frame doubles, which costs latency.
 

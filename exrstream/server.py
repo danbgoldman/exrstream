@@ -11,11 +11,18 @@ from pathlib import Path
 
 import PyNvVideoCodec as nvc
 from aiohttp import web, WSMsgType
+from aiortc import RTCPeerConnection, RTCSessionDescription
 
 from . import gl
 from .seq import FrameCache, SequenceError, discover
 
-HDR = struct.Struct("<IIfI")          # frameIdx, epoch, ev, flags(1=key)
+HDR = struct.Struct("<IIfII")         # frameIdx, epoch, ev, flags(1=key), seq
+# Fragment header for the WebRTC data channel: seq, index, count.
+FRAG = struct.Struct("<IBB")
+# SCTP reassembly limits differ per browser (Chrome advertises 256 KB, others
+# 64 KB) and one CBR frame at 2K/15 Mbps is already 78 KB, so fragment
+# unconditionally rather than branch on what the peer says it can take.
+FRAG_MTU = 16384
 
 # What a delivered packet actually contains. NVENC hands back the frame pushed
 # 3 pushes ago, so this rides along with each push rather than being read off
@@ -49,6 +56,9 @@ class Session:
         # frames through.
         self._pipe = deque()
         self.refresh_hz = 0.0
+        self.pc = self.dc = None
+        self.seq_no = 0
+        self.force_idr = False
 
     def _make_encoder(self):
         """A fresh encoder whenever geometry or rate changes, and on (re)connect:
@@ -117,6 +127,9 @@ class Session:
         """
         self.grade.set_exposure(self.ev)
         img = self.frames[self.frame % len(self.frames)]
+        # A viewer that lost a packet is stuck until the next IDR, and the GOP
+        # is a whole second. Honour the request on the very next push.
+        flags, self.force_idr = int(nvc.FORCEIDR) if self.force_idr else 0, False
         token = object()                         # identity of THIS request
         tag, out = token, []
         for _ in range(8):
@@ -125,7 +138,7 @@ class Session:
             self._pipe.append(Meta(self.frame, self.epoch, self.ev,
                                    self.src, self.view, tag))
             tag = None                           # only the first push is ours
-            for p in self.enc.Encode(self.grade(img)):
+            for p in self.enc.Encode(self.grade(img), flags):
                 meta = (self._pipe.popleft() if self._pipe else
                         Meta(self.frame, self.epoch, self.ev, self.src, self.view, None))
                 out.append((meta, p))
@@ -135,7 +148,54 @@ class Session:
 
     def pack(self, meta, pkt):
         is_key = 1 if pkt.get("picture_type", 0) in (0, 3) else 0
-        return HDR.pack(meta.frame, meta.epoch, meta.ev, is_key) + bytes(pkt["data"])
+        self.seq_no += 1
+        return (HDR.pack(meta.frame, meta.epoch, meta.ev, is_key, self.seq_no)
+                + bytes(pkt["data"]))
+
+    async def send_packet(self, data):
+        """Data channel when it is up, WebSocket otherwise.
+
+        The channel is unordered with no retransmits, which is the whole point:
+        TCP cannot drop a late packet, so one loss stalls every frame behind it
+        (Phase 1 measured 280 ms stalls and one of 2.1 s against a 33 ms
+        arrival gap). Here a lost frame is just a lost frame, and the client
+        asks for an IDR.
+        """
+        dc = self.dc
+        if dc is None or dc.readyState != "open":
+            await self.ws.send_bytes(data)
+            return
+        seq = HDR.unpack_from(data)[4]
+        n = max(1, (len(data) + FRAG_MTU - 1) // FRAG_MTU)
+        for i in range(n):
+            dc.send(FRAG.pack(seq, i, n)
+                    + data[i * FRAG_MTU:(i + 1) * FRAG_MTU])
+
+    async def start_rtc(self, sdp):
+        """Answer the client's offer. No trickle ICE: aiortc's
+        setLocalDescription already waits for gathering, and with no STUN
+        server the host candidates are ready immediately."""
+        await self.stop_rtc()
+        pc = self.pc = RTCPeerConnection()
+
+        @pc.on("datachannel")
+        def _(ch):
+            ch.binaryType = "arraybuffer"
+            self.dc = ch
+
+            @ch.on("close")
+            def _():
+                self.dc = None
+
+        await pc.setRemoteDescription(RTCSessionDescription(sdp, "offer"))
+        await pc.setLocalDescription(await pc.createAnswer())
+        await self.ws.send_json({"type": "answer",
+                                 "sdp": pc.localDescription.sdp})
+
+    async def stop_rtc(self):
+        pc, self.pc, self.dc = self.pc, None, None
+        if pc is not None:
+            await pc.close()
 
     def close(self):
         if self.enc is not None:
@@ -219,7 +279,7 @@ async def ws_handler(request):
                     await ws.send_json({"type": "error", "msg": f"encode: {e}"})
                     return
                 for meta, p in pkts:
-                    await ws.send_bytes(s.pack(meta, p))
+                    await s.send_packet(s.pack(meta, p))
                 s.inflight += 1
                 nxt = max(nxt + period, now)
             await asyncio.sleep(0.001)
@@ -315,8 +375,20 @@ async def ws_handler(request):
                     await ws.send_json({"type": "error", "msg": f"look: {e}"})
             elif t == "ack":
                 s.inflight = max(0, s.inflight - 1)
+            elif t == "offer":
+                try:
+                    await s.start_rtc(m["sdp"])
+                except Exception as e:                        # noqa: BLE001
+                    # The WebSocket path still works; say so rather than
+                    # dying, since this is an optimisation over a fallback.
+                    await ws.send_json({"type": "note",
+                                        "note": f"WebRTC unavailable: {e}"})
+            elif t == "idr":
+                s.force_idr = True
+                s.dirty = s.jump = True
     finally:
         task.cancel()
+        await s.stop_rtc()
         s.close()
     return ws
 

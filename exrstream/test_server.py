@@ -3,7 +3,7 @@ the UI can send, so the browser only has to prove it looks right."""
 import asyncio, json, ssl, struct, sys, time
 import aiohttp
 
-HDR = struct.Struct("<IIfI")
+HDR = struct.Struct("<IIfII")
 
 
 def nals(b):
@@ -58,7 +58,7 @@ async def main(url="https://127.0.0.1:8099"):
                         await ws.send_json({"type": "ack", "frame": h[0]})
                         return h, r.data[HDR.size:]
 
-            (fr, ep, ev, fl), body = await next_frame()
+            (fr, ep, ev, fl, _sq), body = await next_frame()
             assert 5 in nals(body) and 7 in nals(body), f"first frame not IDR+SPS: {nals(body)}"
             print("  first frame is IDR with in-band SPS/PPS")
 
@@ -67,7 +67,7 @@ async def main(url="https://127.0.0.1:8099"):
                 await ws.send_json({"type": "exposure", "ev": -3 + 0.5 * k,
                                     "epoch": k + 1, "final": final})
                 while True:
-                    (fr, ep, ev, fl), _ = await next_frame()
+                    (fr, ep, ev, fl, _sq), _ = await next_frame()
                     if ep == k + 1:
                         return (time.perf_counter() - t0) * 1e3
 

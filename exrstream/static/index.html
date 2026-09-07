@@ -82,6 +82,8 @@ let epoch = 0, pending = null, playing = false, frameIdx = 0;
 const q = []; let TARGET_Q = 6, nextPresent = 0, underruns = 0;
 const lat = [], gaps = [], paintGaps = [], rafGaps = [], idleRaf = [];
 let lastArrival = 0, lastPaint = 0, lastRaf = 0, lastStats = 0, painted = 0;
+let pc = null, dc = null, transport = "websocket";
+let expectSeq = 0, lost = 0, waitKey = false, lastIdrAsk = 0;
 
 const pct = (a,p) => a.length ? [...a].sort((x,y)=>x-y)[Math.min(a.length-1,Math.floor(a.length*p/100))] : NaN;
 
@@ -143,7 +145,8 @@ function stats() {
 arrival gap      p50 ${pct(gaps,50).toFixed(1)}  p95 ${pct(gaps,95).toFixed(1)}  max ${gaps.length?Math.max(...gaps).toFixed(0):"–"} ms
 paint gap        p50 ${pct(paintGaps,50).toFixed(1)}  p95 ${pct(paintGaps,95).toFixed(1)} ms   target ${ready?(1000/ready.fps).toFixed(1):"–"}
 rAF   playing ${hz(rafGaps)} Hz   idle ${hz(idleRaf)} Hz
-buffer ${TARGET_Q}   queue ${q.length}   underruns ${underruns}   painted ${painted}`;
+buffer ${TARGET_Q}   queue ${q.length}   underruns ${underruns}   painted ${painted}
+transport ${transport}   packets lost ${lost}`;
 }
 
 function setupDecoder() {
@@ -171,7 +174,7 @@ function connect() {
   ws.onopen = () => { $("#conn").textContent = "connected"; $("#conn").className = "k"; };
   ws.onclose = () => { $("#conn").textContent = "disconnected"; $("#conn").className = "dim"; };
   ws.onmessage = ev => {
-    if (typeof ev.data !== "string") return onFrame(ev.data);
+    if (typeof ev.data !== "string") return onFrame(new Uint8Array(ev.data));
     const m = JSON.parse(ev.data);
     if (m.type === "sequences") {
       info = m;
@@ -184,6 +187,10 @@ function connect() {
       for (const cs of m.colorspaces) $("#src").append(new Option(cs, cs, cs === "ACEScg", cs === "ACEScg"));
       for (const v of m.views) $("#view").append(new Option(v, v));
       setupDecoder();
+      startRTC().catch(e => console.error("webrtc:", e));
+    } else if (m.type === "answer") {
+      pc.setRemoteDescription({ type: "answer", sdp: m.sdp })
+        .catch(e => console.error("webrtc:", e));
     } else if (m.type === "loading") {
       $("#load").style.display = "flex";
       $("#barf").style.width = `${100 * m.done / m.total}%`;
@@ -214,16 +221,77 @@ function note(text) {
   if (text) $("#warn").textContent = "⚠ " + text;
 }
 
-function onFrame(buf) {
-  const dv = new DataView(buf);
+// `pkt` is the whole packet: 20-byte header then the annex-b bitstream.
+function onFrame(pkt) {
+  const dv = new DataView(pkt.buffer, pkt.byteOffset, pkt.byteLength);
   frameIdx = dv.getUint32(0, true);
   const ep = dv.getUint32(4, true), isKey = dv.getUint32(12, true) === 1;
+  const seq = dv.getUint32(16, true);
+
+  // The data channel neither retransmits nor orders, so a packet can be
+  // missing (or, rarely, late). Either way the decoder must not be handed a
+  // delta whose reference never arrived: wait for a key frame and ask for one,
+  // since the GOP is a whole second.
+  if (expectSeq && seq < expectSeq) return;                 // stale reorder
+  if (expectSeq && seq > expectSeq) { lost += seq - expectSeq; waitKey = true; }
+  expectSeq = seq + 1;
+  if (waitKey) {
+    if (!isKey) {
+      const now = performance.now();
+      if (now - lastIdrAsk > 200) { lastIdrAsk = now; send({ type:"idr" }); }
+      send({ type:"ack", frame: frameIdx });
+      return;
+    }
+    waitKey = false;
+  }
+
   try {
     dec.decode(new EncodedVideoChunk({
-      type: isKey ? "key" : "delta", timestamp: ep, data: new Uint8Array(buf, 16) }));
+      type: isKey ? "key" : "delta", timestamp: ep,
+      data: pkt.subarray(20) }));
   } catch (e) { console.error(e); return; }
   if (!playing) $("#tl").value = frameIdx;
   send({ type:"ack", frame: frameIdx });
+}
+
+// A packet is split into <=16 KB fragments, because browsers disagree on the
+// largest SCTP message they will reassemble and one CBR frame already exceeds
+// the smallest of those limits. A fragment lost is the frame lost, which is
+// the same case as a packet lost above.
+const frags = new Map();
+function onFragment(buf) {
+  const dv = new DataView(buf);
+  const seq = dv.getUint32(0, true), i = dv.getUint8(4), n = dv.getUint8(5);
+  const body = new Uint8Array(buf, 6);
+  if (n === 1) return onFrame(body);
+  let f = frags.get(seq);
+  if (!f) { frags.set(seq, f = { n, got: 0, len: 0, parts: new Array(n) }); }
+  if (f.parts[i]) return;
+  f.parts[i] = body; f.got++; f.len += body.byteLength;
+  for (const k of frags.keys()) if (seq - k > 8) frags.delete(k);  // never completing
+  if (f.got !== n) return;
+  frags.delete(seq);
+  const out = new Uint8Array(f.len);
+  let o = 0;
+  for (const part of f.parts) { out.set(part, o); o += part.byteLength; }
+  onFrame(out);
+}
+
+async function startRTC() {
+  if (!window.RTCPeerConnection) return;
+  pc = new RTCPeerConnection();
+  dc = pc.createDataChannel("v", { ordered: false, maxRetransmits: 0 });
+  dc.binaryType = "arraybuffer";
+  dc.onmessage = e => onFragment(e.data);
+  dc.onopen = () => { transport = "webrtc"; expectSeq = 0; stats(); };
+  dc.onclose = dc.onerror = () => { transport = "websocket"; stats(); };
+  await pc.setLocalDescription(await pc.createOffer());
+  // Gather fully before offering: without a STUN server the host candidates
+  // are immediate, and that is one round of signalling instead of trickle.
+  if (pc.iceGatheringState !== "complete")
+    await new Promise(r => pc.addEventListener("icegatheringstatechange",
+      () => pc.iceGatheringState === "complete" && r()));
+  send({ type:"offer", sdp: pc.localDescription.sdp });
 }
 
 $("#seq").onchange = e => { if (e.target.value) send({ type:"open", key:e.target.value }); };

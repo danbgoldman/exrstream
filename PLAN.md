@@ -413,12 +413,10 @@ needed.** Cold 4K decode is 2× realtime.
 Phase 1 works and is committed. These are ordered by how much measurement backs
 them, not by appeal.
 
-1. **WebRTC transport.** The only item with a measured defect behind it: with
-   arrival gaps at 33 ms p50, Phase 1 saw occasional 280 ms stalls and one of
-   2.1 s. That is TCP head-of-line blocking, and buffering only hides it by
-   paying latency — it cannot remove it. WebRTC can drop a late packet instead
-   of stalling the stream behind it. Off-the-shelf (pion, GStreamer
-   `webrtcbin`), just much more machinery than a WebSocket.
+1. ~~**WebRTC transport.**~~ **Built — see below.** Not the media-track WebRTC
+   the plan imagined: an unreliable, unordered **data channel** carrying the
+   same packets, which removes head-of-line blocking without giving up NVENC or
+   WebCodecs. Effect on the real link is not yet measured.
 2. **Negotiate frame rate automatically.** The client already measures its
    refresh and the server already warns when the rate cannot be presented
    evenly, but choosing the rate is still manual. NVENC's `Reconfigure` makes
@@ -446,6 +444,46 @@ them, not by appeal.
 8. ~~**Disk mezzanine + nvdec.**~~ Ruled out by item 3: EXR decode beats
    realtime cold as well as warm. What remains is only a RAM-capacity question
    for sequences too long to cache, which is a different feature.
+
+## The transport, as built
+
+WebRTC was on the list for one measured reason — TCP head-of-line blocking, seen
+as 280 ms stalls and one of 2.1 s against a 33 ms arrival gap — and *not*
+because the stream needed to become a media track. So it did not become one.
+
+Frames go over an **`RTCDataChannel` with `ordered: false, maxRetransmits: 0`**,
+carrying the identical header + Annex-B packet the WebSocket carried. NVENC
+still feeds WebCodecs directly; nothing is repacketised into RTP, no encoder is
+negotiated in SDP, and the WebSocket stays for control and for signalling. When
+the channel is not up, packets go down the socket as before, so this is an
+upgrade rather than a fork.
+
+What the transport change forces, and what it does not:
+
+- **A loss is now possible, so it has to be handled.** The client keeps a packet
+  sequence number, and on a gap stops decoding, waits for a key frame, and asks
+  the server for one (`FORCEIDR` on the next push). Without that a lost packet
+  means up to a second of corruption, since the GOP is a second. Deltas whose
+  reference never arrived are never handed to the decoder.
+- **Fragmentation is unconditional, at 16 KB.** Browsers disagree on the largest
+  SCTP message they will reassemble (256 KB in Chrome, 64 KB elsewhere) and one
+  strict-CBR frame at 2K/15 Mbps is already 78 KB, so a size check would be a
+  branch that is taken in the common case. A lost fragment is a lost frame,
+  which is the case above.
+- **No trickle ICE.** With no STUN server the host candidates are ready
+  immediately, so both sides gather fully before exchanging one offer and one
+  answer.
+- **aiortc's SCTP is pure Python and shares the event loop with GL and NVENC**,
+  which is the obvious way this could have been slower than the TCP it replaces.
+  Measured on loopback, arrival gaps are indistinguishable: HD/15 Mbps p95 42.4
+  vs 42.5 ms on the WebSocket; 4K/20 Mbps (7 fragments a frame) p95 44.4 vs
+  43.4. It keeps up.
+
+**What is not measured: whether it fixes the stalls.** Loopback has no loss and
+no HOL blocking, so it can only show the cost, not the benefit. That needs the
+real link, and a browser — `test_webrtc.py` covers the server half (fragment
+order, sequence continuity, NAL boundaries, IDR on request) but the client half
+is JavaScript that only a browser runs.
 
 ## Rejected
 
