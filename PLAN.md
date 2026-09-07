@@ -417,11 +417,11 @@ them, not by appeal.
    carrying the same packets loses to the WebSocket on the real link — see
    "WebRTC, measured and rejected" below. The defect that motivated it is still
    real; this answer to it is not.
-2. **Negotiate frame rate automatically.** The client already measures its
-   refresh and the server already warns when the rate cannot be presented
-   evenly, but choosing the rate is still manual. NVENC's `Reconfigure` makes
-   changing it mid-session cheap. Offer resampling explicitly, never as a
-   default — it alters motion timing, which is a lie about the footage.
+2. ~~**Negotiate frame rate automatically.**~~ **Done — see "Two rates" below.**
+   The client reports its refresh whenever the measurement moves, the server
+   streams at the divisor of that refresh nearest the sequence rate, and the
+   source position advances at the sequence rate regardless. Resampling is a
+   checkbox, never a default.
 3. ~~**Cold 4K I/O**~~ — **done**, and it found a real defect: `FrameCache.load`
    decoded serially, so `--workers` only ever parallelised *across* sessions and
    a cold 4K open ran at 10.4 fps (0.55 GB/s) against a 1.27 GB/s realtime
@@ -444,6 +444,54 @@ them, not by appeal.
 8. ~~**Disk mezzanine + nvdec.**~~ Ruled out by item 3: EXR decode beats
    realtime cold as well as warm. What remains is only a RAM-capacity question
    for sequences too long to cache, which is a different feature.
+
+## Two rates, and why they are not the same number
+
+Phase 0 found that 24 fps on a 30 Hz display cannot be presented evenly and
+fixed it by switching the stream to 30 fps. That fix was a lie: it also ran the
+footage 25% fast. Which is fine as an explicit choice and disastrous as a
+default in a tool people use to judge motion.
+
+The resolution is that there are two rates and they were being conflated:
+
+- **`src_fps`** — what the sequence is meant to run at. Declared, not detected;
+  EXRs carry no frame rate any more than they carry a colourspace.
+- **`out_fps`** — what we encode and send. Chosen as `hz / round(hz / src_fps)`,
+  the divisor of the display refresh nearest the sequence rate, so every frame
+  lands on exactly one refresh.
+
+When they differ, the source position advances by `src_fps / out_fps` per output
+frame, so a 24 fps sequence streamed at 30 repeats one frame in five and still
+takes exactly as long to play as it would anywhere else. Measured over the
+socket: **30.7 fps of stream carrying 24.0 fps of sequence.** That is broadcast
+pulldown, and the residual unevenness is inherent to 24-in-30 rather than
+something the tool added.
+
+Cases worth knowing, all in `test_rate.py`:
+
+| sequence | display | stream | what happens |
+|----------|---------|--------|--------------|
+| 24 | 30 Hz | 30 | repeat 1 in 5 |
+| 24 | 60 Hz | 30 | repeat 1 in 5 (60 would repeat 1 in 2, no better) |
+| 24 | 120 Hz | 24 | nothing; 24 already divides 120 |
+| 23.976 | 59.94 Hz | 29.97 | repeat 1 in 5 |
+| 48 | 30 Hz | 30 | *drop* frames — faster than the display, so something must go |
+
+**Resampling stays an opt-in checkbox** that advances one source frame per
+output frame, and the note then says "1.25x speed" rather than hiding it.
+
+**The refresh is re-reported, not asked once.** Unplugging a laptop halves it,
+which is exactly the case that started all this, so the client sends its
+measurement whenever the median moves more than 1.5 Hz and the server re-picks
+the rate. A new encoder rather than NVENC's `Reconfigure`: rate changes are
+rare, `_make_encoder` already exists, and the cost is one IDR the client is
+already prepared for. `Reconfigure` is the upgrade if that ever stops being true.
+
+**Known cost, not measured.** Streaming 24 fps content at 30 spends strict-CBR
+bits on repeated frames, so each frame gets 62.5 KB where it used to get 78 KB
+at 15 Mbps. The repeats are not entirely wasted — NVENC refines the same
+picture, improving the reference for the next distinct frame — but quality at a
+given bitrate is lower than it was. Raise `--mbps` if it shows.
 
 ## WebRTC, measured and rejected
 

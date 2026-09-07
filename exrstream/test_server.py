@@ -47,8 +47,10 @@ async def main(url="https://127.0.0.1:8099"):
                     raise AssertionError(m["msg"])
             assert saw_loading, "no loading progress reported"
             print(f"  ready: {m['w']}x{m['h']} {m['frames']}f fps={m['fps']} cache={m['cache_gb']}GB")
-            assert m["note"] and "judder" in m["note"], "24fps on 30Hz must warn"
-            print(f"  cadence note fired ok")
+            assert m["src_fps"] == 24 and m["fps"] == 30, \
+                f"24 fps on 30 Hz must stream at 30: {m['src_fps']} -> {m['fps']}"
+            assert m["note"] and "repeating" in m["note"], m["note"]
+            print(f"  24fps on 30Hz negotiated to a 30fps stream, and says so")
 
             async def next_frame(timeout=10):
                 while True:
@@ -117,8 +119,14 @@ async def main(url="https://127.0.0.1:8099"):
                 seen.append(fr); n += 1
             await ws.send_json({"type": "play", "on": False})
             dup = sum(1 for a, b in zip(seen, seen[1:]) if a == b)
-            print(f"  playback {n/3:.1f} fps, duplicate frames {dup}")
-            assert n / 3 > 20, f"playback only {n/3:.1f} fps"
+            fresh = (n - dup) / 3
+            print(f"  playback {n/3:.1f} fps stream, {fresh:.1f} fps of sequence "
+                  f"({dup} repeats)")
+            assert n / 3 > 25, f"stream only {n/3:.1f} fps against 30"
+            # The point of the whole feature: the stream runs at the display
+            # rate while the sequence still advances at 24.
+            assert 22 < fresh < 26, \
+                f"sequence advanced at {fresh:.1f} fps, not 24 -- motion is wrong"
 
             await ws.send_json({"type": "fps", "fps": 30})
             while True:
@@ -130,8 +138,9 @@ async def main(url="https://127.0.0.1:8099"):
                 m = json.loads(r.data)
                 if m["type"] == "ready":
                     break
-            assert m["fps"] == 30 and not m["note"], f"30fps on 30Hz should not warn: {m['note']}"
-            print("  fps change ok, warning cleared at 30fps on 30Hz")
+            assert m["fps"] == 30 and m["src_fps"] == 30 and not m["note"], \
+                f"a 30fps sequence on 30Hz needs no repeats and no note: {m['note']}"
+            print("  30fps sequence on 30Hz: streamed as-is, nothing to report")
 
             await ws.send_json({"type": "look", "src": "ACES2065-1"})
             (fr, *_), body = await next_frame()

@@ -44,10 +44,12 @@
   <button id="evr">reset</button>
   <label>in <select id="src"></select></label>
   <label>view <select id="view"></select></label>
-  <label>fps <select id="fps">
+  <label>sequence <select id="fps">
     <option>23.976</option><option selected>24</option><option>25</option>
     <option>29.97</option><option>30</option><option>48</option><option>60</option>
-  </select></label>
+  </select> fps</label>
+  <label title="Runs the sequence at the display rate. Smoother, but the motion
+is no longer the footage's."><input id="resample" type="checkbox"> match display</label>
   <span id="conn" class="dim">connecting…</span>
   <button id="statsb">stats</button>
 </header>
@@ -76,7 +78,7 @@ if (!window.VideoDecoder) {
 }
 
 let ws, dec, info = null, ready = null;
-let epoch = 0, pending = null, playing = false, frameIdx = 0;
+let epoch = 0, pending = null, playing = false, frameIdx = 0, reportedHz = 0;
 // Playback drains a queue on a clock; the slider bypasses it while paused.
 // Painting on arrival is what makes the slider instant and playback judder.
 const q = []; let TARGET_Q = 6, nextPresent = 0, underruns = 0;
@@ -102,6 +104,18 @@ function paint(frame) {
 }
 const flushQ = () => { while (q.length) q.shift().close(); };
 
+// The refresh is not a constant: unplugging a laptop halves it, and macOS caps
+// ProMotion on battery. Report it whenever the measurement actually moves, so
+// the server can re-pick the stream rate rather than being told once at startup.
+function reportHz() {
+  const a = playing ? rafGaps : idleRaf;
+  if (a.length < 40) return;
+  const hz = 1000 / pct(a, 50);
+  if (Math.abs(hz - reportedHz) < 1.5) return;
+  reportedHz = hz;
+  send({ type:"hello", refreshHz: hz });
+}
+
 function tick(ts) {
   requestAnimationFrame(tick);
   if (lastRaf) {
@@ -111,6 +125,7 @@ function tick(ts) {
     if (idleRaf.length > 240) idleRaf.shift();
   }
   lastRaf = ts;
+  reportHz();
   if (!playing || !ready) { if (ts - lastStats > 400) { lastStats = ts; stats(); } return; }
 
   // Adaptive period: the server clock and this clock always drift, and a fixed
@@ -128,13 +143,16 @@ function tick(ts) {
     else { underruns++; nextPresent += period; }
   }
   if (ts - lastStats > 250) { lastStats = ts; stats(); }
+  reportHz();
 }
 requestAnimationFrame(tick);
 
 function stats() {
   $("#pos").textContent = ready ? `frame ${frameIdx + 1} / ${ready.frames}` : "–";
   $("#meta").textContent = ready
-    ? `· ${ready.w}×${ready.h} · ${ready.fps} fps · ${ready.src} → ${ready.view} · cache ${ready.cache_gb} GB`
+    ? `· ${ready.w}×${ready.h} · ${ready.src_fps}\u2009fps${
+        ready.fps === ready.src_fps ? "" : ` (streamed at ${ready.fps}\u2009fps for ${ready.hz}\u2009Hz)`
+      } · ${ready.src} → ${ready.view} · cache ${ready.cache_gb} GB`
     : "";
   if ($("#stats").style.display === "none") return;
   // Rewriting the text node every 250 ms destroys any selection inside it,
@@ -201,7 +219,8 @@ function connect() {
       ready = m; frameIdx = m.first;
       $("#tl").max = m.frames - 1; $("#tl").value = 0; $("#tl").disabled = false;
       for (const b of ["play","prev","next"]) $("#"+b).disabled = false;
-      $("#fps").value = String(m.fps);
+      $("#fps").value = String(m.src_fps);
+      $("#resample").checked = m.resample;
       setupDecoder();
       const bad = (m.bad && m.bad.length)
         ? `${m.bad.length} frame(s) unreadable and shown black (first at ${m.bad[0]}). `
@@ -263,7 +282,10 @@ const step = d => { if (playing) $("#play").onclick(); send({ type:"step", delta
 $("#prev").onclick = () => step(-1);
 $("#next").onclick = () => step(1);
 $("#tl").oninput = e => { if (playing) $("#play").onclick(); send({ type:"seek", frame:+e.target.value }); };
-$("#fps").onchange = e => send({ type:"fps", fps:+e.target.value });
+const sendRate = () => send({ type:"fps", fps:+$("#fps").value,
+                             resample: $("#resample").checked });
+$("#fps").onchange = sendRate;
+$("#resample").onchange = sendRate;
 $("#src").onchange = e => send({ type:"look", src:e.target.value });
 $("#view").onchange = e => send({ type:"look", view:e.target.value });
 $("#statsb").onclick = () => {
@@ -276,8 +298,5 @@ addEventListener("keydown", e => {
   else if (e.code === "ArrowRight") step(1);
 });
 
-// Measure the display refresh before a sequence is picked, so the server can
-// warn about a rate the display cannot present evenly.
-setTimeout(() => send({ type:"hello", refreshHz: idleRaf.length ? 1000/pct(idleRaf,50) : 0 }), 1500);
 connect();
 </script>

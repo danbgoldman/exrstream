@@ -34,10 +34,16 @@ class Session:
         self.app, self.ws = app, ws
         self.seq = self.frames = self.grade = self.enc = None
         self.w = self.h = 0
-        self.fps = 24.0
+        # Two rates, and conflating them is the bug this exists to prevent.
+        # `src_fps` is what the footage is meant to run at; `out_fps` is what we
+        # encode and send, chosen to divide the client's display refresh.
+        self.src_fps = 24.0
+        self.out_fps = 24.0
+        self.pos = 0.0
         self.src = app["args"].src
         self.view = gl.VIEW
         self.ev, self.epoch, self.frame = 0.0, 0, 0
+        self.resample = False
         self.playing, self.dirty, self.jump = False, False, False
         self.flush_next = False
         self.settle_at = 0.0
@@ -63,6 +69,32 @@ class Session:
         """
         return max(0, self.seq_no - self.acked)
 
+    def retune(self):
+        """Pick the encode rate for the measured refresh. True if it changed.
+
+        Resampling -- letting the sequence run at the display rate, which is
+        what "just play it at 30" means -- alters motion timing, so it is only
+        ever done when asked for.
+        """
+        was = self.out_fps
+        self.out_fps = stream_fps(self.src_fps, self.refresh_hz)
+        return abs(self.out_fps - was) > 1e-6
+
+    def advance(self):
+        """One output frame on. The source position moves at the SOURCE rate, so
+        a 24 fps sequence streamed at 30 repeats one frame in five and still
+        takes the same wall-clock time it would in any other player."""
+        # Resampling means one source frame per output frame regardless of
+        # rate, which is what makes it fast. `src_fps` stays the sequence's
+        # declared rate either way, or nothing could say by how much.
+        step = 1.0 if self.resample else self.src_fps / self.out_fps
+        self.pos = (self.pos + step) % len(self.frames)
+        self.frame = int(self.pos)
+
+    def seek(self, frame):
+        self.frame = frame % len(self.frames)
+        self.pos = float(self.frame)
+
     def _make_encoder(self):
         """A fresh encoder whenever geometry or rate changes, and on (re)connect:
         a client joining mid-stream would otherwise hit a P-frame with no
@@ -73,7 +105,7 @@ class Session:
             except Exception:
                 pass
         a = self.app["args"]
-        gop = max(1, int(round(self.fps)))
+        gop = max(1, int(round(self.out_fps)))
         bits = int(a.mbps * 1e6)
         # VBV buffer of `vbv_frames` frames. Without it NVENC's CBR overshoots
         # by ~16% on real footage (15 -> 17.4 Mbps on Tears of Steel water
@@ -81,10 +113,10 @@ class Session:
         # caps the peak frame -- 1.40 -> 0.63 Mbit -- which halves the worst-case
         # transmit time, so it buys latency as well as fitting the link.
         # `maxbitrate` does nothing here; only vbvbufsize constrains it.
-        vbv = max(1, int(a.vbv_frames * bits / max(self.fps, 1)))
+        vbv = max(1, int(a.vbv_frames * bits / max(self.out_fps, 1)))
         self.enc = nvc.CreateEncoder(
             self.w, self.h, "ARGB", True, codec=a.codec,
-            bitrate=bits, rc="cbr", fps=int(round(self.fps)),
+            bitrate=bits, rc="cbr", fps=int(round(self.out_fps)),
             gop=gop, bf=0, idrperiod=gop, tuning_info="ultra_low_latency",
             preset="P3", repeatspspps=1, vbvbufsize=vbv, vbvinit=vbv)
         self._pipe.clear()
@@ -95,7 +127,8 @@ class Session:
         self.seq, self.frames = seq, frames
         self.h, self.w = frames[0].shape[:2]
         self.grade = gl.grade_for(self.w, self.h, self.src, gl.DISPLAY, self.view)
-        self.frame = 0
+        self.seek(0)
+        self.retune()
         self._make_encoder()
 
     def set_look(self, src=None, view=None):
@@ -161,21 +194,63 @@ class Session:
             self.enc = None
 
 
-def cadence_note(fps, hz):
-    """Say plainly when the display cannot present this rate evenly.
+def stream_fps(src_fps, hz):
+    """The rate to encode at: the divisor of the display refresh nearest the
+    sequence rate.
 
-    Resampling to the refresh rate would look smoother and would be a lie about
-    motion timing, so it is offered as an explicit choice, never a default.
+    A rate that does not divide the refresh cannot be presented evenly -- 24 on
+    30 Hz is 1.25 refreshes per frame, so paints alternate 33/67 ms and the
+    result is judder that looks like a network fault. Streaming a divisor
+    instead makes every paint land on a refresh; where that rate is not the
+    sequence rate, `Session.advance` repeats or drops source frames to keep the
+    sequence running at its own speed.
+    """
+    if not hz or hz <= 0:
+        return src_fps
+    return hz / max(1, round(hz / src_fps))
+
+
+def cadence_note(src_fps, out_fps, hz, resample):
+    """Say plainly what is being done to the footage, if anything.
+
+    Silence when the sequence rate divides the refresh, because then nothing is
+    being done and a warning would be noise.
     """
     if not hz:
         return None
-    ratio = hz / fps
-    if abs(ratio - round(ratio)) < 0.02:
+    if resample:
+        return (f"Playing at the display rate: {out_fps:g} fps instead of "
+                f"{src_fps:g}, so motion runs "
+                f"{out_fps / src_fps:.2f}x speed. Smooth, but the timing is "
+                f"not the footage's.")
+    if abs(out_fps - src_fps) < 0.01:
         return None
-    return (f"{fps:g} fps on a {hz:.0f} Hz display is {ratio:.2f} refreshes per "
-            f"frame, so motion will judder. Laptops on battery often cap "
-            f"refresh. Playing at {hz:.0f} fps would look smooth but would "
-            f"alter motion timing.")
+    what = ("repeating" if out_fps > src_fps else "dropping")
+    every = out_fps / abs(out_fps - src_fps)
+    return (f"{src_fps:g} fps on a {hz:.0f} Hz display cannot be presented "
+            f"evenly, so the stream runs at {out_fps:g} fps, {what} one frame "
+            f"in {every:.1f}. The sequence still runs at {src_fps:g} fps -- "
+            f"motion timing is exact and the uneven cadence is inherent to "
+            f"{src_fps:g}-in-{hz:.0f}. Laptops on battery often cap refresh.")
+
+
+def note_for(s):
+    return cadence_note(s.src_fps, s.out_fps, s.refresh_hz, s.resample)
+
+
+def ready_msg(s, app, first=0, bad=None):
+    """Everything the client needs to draw and to time the stream.
+
+    `fps` is the stream rate, which is what the presentation clock runs on;
+    `src_fps` is the sequence's own rate, which is what the UI must show, or the
+    viewer cannot tell a repeated frame from a fast one.
+    """
+    return {"type": "ready", "w": s.w, "h": s.h, "frames": len(s.frames),
+            "first": first, "fps": s.out_fps, "src_fps": s.src_fps,
+            "resample": s.resample, "hz": round(s.refresh_hz, 1),
+            "src": s.src, "view": s.view, "name": Path(s.seq.key).name,
+            "cache_gb": round(app["cache"].bytes / 2**30, 2),
+            "bad": bad or [], "note": note_for(s)}
 
 
 async def ws_handler(request):
@@ -197,7 +272,7 @@ async def ws_handler(request):
                 await asyncio.sleep(0.01)
                 continue
             now = time.perf_counter()
-            period = 1.0 / s.fps
+            period = 1.0 / s.out_fps
             send = False
             # A discrete change (step, seek, view, settled exposure) pulls the
             # schedule forward and is answered at once. A mid-drag exposure
@@ -222,7 +297,7 @@ async def ws_handler(request):
                 # updated the uniform, so the next scheduled frame carries it.
                 s.dirty = False
                 if s.inflight < MAX_INFLIGHT and now >= nxt:
-                    s.frame = (s.frame + 1) % len(s.frames)
+                    s.advance()
                     send = True
             elif s.dirty and s.inflight < MAX_INFLIGHT and now >= nxt:
                 s.dirty, send = False, True
@@ -266,13 +341,7 @@ async def ws_handler(request):
             await ws.send_json({"type": "error", "msg": f"load failed: {e}"})
             return
         s.bind(seq, frames)
-        await ws.send_json({
-            "type": "ready", "w": s.w, "h": s.h, "frames": len(frames),
-            "first": first, "fps": s.fps, "src": s.src, "view": s.view,
-            "name": Path(seq.key).name,
-            "cache_gb": round(app["cache"].bytes / 2**30, 2),
-            "bad": bad,
-            "note": cadence_note(s.fps, s.refresh_hz)})
+        await ws.send_json(ready_msg(s, app, first=first, bad=bad))
 
     task = asyncio.create_task(pump())
     try:
@@ -282,10 +351,15 @@ async def ws_handler(request):
             m = json.loads(msg.data)
             t = m.get("type")
             if t == "hello":
+                # The refresh can change under us -- plugging a laptop in is
+                # enough -- so this arrives whenever the client's measurement
+                # moves, not only at connect.
                 s.refresh_hz = float(m.get("refreshHz") or 0)
-                if s.frames:
-                    await ws.send_json({"type": "note",
-                                        "note": cadence_note(s.fps, s.refresh_hz)})
+                if s.retune() and s.frames:
+                    s._make_encoder()
+                    await ws.send_json(ready_msg(s, app))
+                elif s.frames:
+                    await ws.send_json({"type": "note", "note": note_for(s)})
             elif t == "open":
                 await do_open(m["key"], int(m.get("first", 0)), int(m.get("count", 0)))
             elif t == "exposure":
@@ -306,21 +380,20 @@ async def ws_handler(request):
                     s.flush_next = s.jump = True
                 s.settle_at = 0.0
             elif t == "seek" and s.frames:
-                s.frame = int(m["frame"]) % len(s.frames)
+                s.seek(int(m["frame"]))
                 s.dirty = s.jump = s.flush_next = True
             elif t == "step" and s.frames:
                 s.playing = False
-                s.frame = (s.frame + int(m["delta"])) % len(s.frames)
+                s.seek(s.frame + int(m["delta"]))
                 s.dirty = s.jump = s.flush_next = True
             elif t == "fps" and s.frames:
-                s.fps = max(1.0, float(m["fps"]))
+                if "fps" in m:
+                    s.src_fps = max(1.0, float(m["fps"]))
+                if "resample" in m:
+                    s.resample = bool(m["resample"])
+                s.retune()
                 s._make_encoder()
-                await ws.send_json({"type": "ready", "w": s.w, "h": s.h,
-                                    "frames": len(s.frames), "first": 0,
-                                    "fps": s.fps, "src": s.src, "view": s.view,
-                                    "name": Path(s.seq.key).name,
-                                    "cache_gb": round(app["cache"].bytes / 2**30, 2),
-                                    "note": cadence_note(s.fps, s.refresh_hz)})
+                await ws.send_json(ready_msg(s, app))
             elif t == "look" and s.frames:
                 try:
                     s.set_look(m.get("src"), m.get("view"))

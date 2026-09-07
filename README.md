@@ -71,11 +71,14 @@ rewriting a shader. A test checks the shipped grade against OCIO's independent
 CPU implementation on deliberately hostile imagery, because a review tool that
 is confidently wrong about colour is worse than no review tool.
 
-**Frame rate has to match the viewer's display.** 24 fps content on a 30 Hz
-screen cannot be shown evenly — it is 1.25 refreshes per frame — and the result
-is judder that looks like a network problem but is not. (Laptops on battery
-routinely drop to 30 Hz.) exrstream measures the browser's actual refresh rate
-and says so, rather than silently misrepresenting motion.
+**Frame rate has to match the viewer's display, without changing the footage.**
+24 fps content on a 30 Hz screen cannot be shown evenly — it is 1.25 refreshes
+per frame — and the result is judder that looks like a network problem but is
+not. (Laptops on battery routinely drop to 30 Hz.) exrstream measures the
+browser's refresh rate and streams at a rate that divides it, repeating source
+frames so the sequence still runs at its own speed. Playing it faster to make it
+smooth is offered as a checkbox, because it is a lie about motion and you should
+have to ask for it.
 
 **It refuses rather than guesses.** EXRs carry no colourspace metadata, so the
 input colourspace is something you tell it, not something it infers. Mixed
