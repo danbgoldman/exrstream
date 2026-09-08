@@ -96,6 +96,10 @@ failure mode this tool has.
   Decrementing a counter per ack leaks a slot whenever an ack does not arrive --
   a frame the decoder rejects is enough -- and a few of those stop the pump for
   good. The client acks *before* it decodes, for the same reason.
+- The timeline shows the frame being **painted**, not the one that arrived: the
+  client queues ~200 ms of frames during playback, so the index rides through
+  the decoder in `idxQ` (safe because `bf=0` means decode order is output
+  order). Updating it from `onFrame` runs the slider ahead of the picture.
 - A/B is two scissored draws into A's framebuffer, so it needs no second encoder
   and no second readback. `Grade.render(img, fbo=, scissor=)` is split out from
   `Grade.read()` for exactly this; `__call__` is still both.

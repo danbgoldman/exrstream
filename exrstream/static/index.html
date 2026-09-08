@@ -162,11 +162,20 @@ let wipe = 0.5, dragging = false;
 const q = []; let TARGET_Q = 6, nextPresent = 0, underruns = 0;
 const lat = [], gaps = [], paintGaps = [], rafGaps = [], idleRaf = [];
 let lastArrival = 0, lastPaint = 0, lastRaf = 0, lastStats = 0, painted = 0;
+// Frame index per decoded frame, in decode order. bf=0 means no B-frames, so
+// WebCodecs hands them back in the order they went in.
+const idxQ = [];
 
 const pct = (a,p) => a.length ? [...a].sort((x,y)=>x-y)[Math.min(a.length-1,Math.floor(a.length*p/100))] : NaN;
 
-function paint(frame) {
-  const ep = frame.timestamp;
+function paint(item) {
+  const frame = item.f, ep = frame.timestamp;
+  // Position comes from the frame being SHOWN, not the one that just arrived:
+  // during playback the queue holds ~200 ms of frames, so updating on arrival
+  // would run the timeline ahead of the picture. Guarding it with `if (!playing)`
+  // was the old fix for that, and it froze the slider instead.
+  frameIdx = item.idx;
+  if (document.activeElement !== $("#tl")) $("#tl").value = String(frameIdx);
   if (pending && ep >= pending.epoch) {
     lat.push(performance.now() - pending.t0);
     if (lat.length > 200) lat.shift();
@@ -189,7 +198,7 @@ function paint(frame) {
   if (lastPaint && playing) { paintGaps.push(t - lastPaint); if (paintGaps.length > 300) paintGaps.shift(); }
   lastPaint = t;
 }
-const flushQ = () => { while (q.length) q.shift().close(); };
+const flushQ = () => { while (q.length) q.shift().f.close(); };
 
 // The refresh is not a constant: unplugging a laptop halves it, and macOS caps
 // ProMotion on battery. Report it whenever the measurement actually moves, so
@@ -260,6 +269,7 @@ buffer ${TARGET_Q}   queue ${q.length}   underruns ${underruns}   painted ${pain
 
 function setupDecoder() {
   if (dec) { try { dec.close(); } catch (e) {} }
+  idxQ.length = 0;                 // its pending outputs are gone with it
   dec = new VideoDecoder({
     output: f => {
       const now = performance.now();
@@ -269,8 +279,9 @@ function setupDecoder() {
       // direction.
       if (lastArrival && playing) { gaps.push(now - lastArrival); if (gaps.length > 300) gaps.shift(); }
       lastArrival = now;
-      if (!playing) { flushQ(); paint(f); stats(); return; }
-      q.push(f);
+      const item = { f, idx: idxQ.length ? idxQ.shift() : frameIdx };
+      if (!playing) { flushQ(); paint(item); stats(); return; }
+      q.push(item);
       if (q.length > TARGET_Q + 6) paint(q.shift());
     },
     error: e => { $("#conn").textContent = "decoder error"; console.error(e); }
@@ -369,9 +380,8 @@ function note(text) {
 // `pkt` is the whole packet: 20-byte header then the annex-b bitstream.
 function onFrame(pkt) {
   const dv = new DataView(pkt.buffer, pkt.byteOffset, pkt.byteLength);
-  frameIdx = dv.getUint32(0, true);
   const ep = dv.getUint32(4, true), isKey = dv.getUint32(12, true) === 1;
-  const seq = dv.getUint32(16, true);
+  const seq = dv.getUint32(16, true), idx = dv.getUint32(0, true);
 
   // Ack before decoding, not after: the server sizes its send window from the
   // highest sequence number acked, and a frame the decoder rejects is still a
@@ -383,7 +393,7 @@ function onFrame(pkt) {
       type: isKey ? "key" : "delta", timestamp: ep,
       data: pkt.subarray(20) }));
   } catch (e) { console.error(e); return; }
-  if (!playing) $("#tl").value = frameIdx;
+  idxQ.push(idx);          // only once the decoder has actually taken it
 }
 
 $("#seq").onchange = e => { if (e.target.value) send({ type:"open", key:e.target.value }); };
