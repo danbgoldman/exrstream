@@ -10,82 +10,134 @@
   header, footer { background:var(--panel); border-color:var(--line); }
   header { padding:8px 12px; display:flex; gap:14px; align-items:center;
            flex-wrap:wrap; border-bottom:1px solid var(--line); }
+  header .grow { flex:1; }
   footer { padding:8px 12px; border-top:1px solid var(--line);
            display:flex; flex-direction:column; gap:8px; }
-  /* A and B are the same row twice, deliberately: identical widgets in the
-     same order, so the eye compares the values and not the layout. */
-  .abrow { display:flex; gap:12px; align-items:center; flex-wrap:wrap;
-           padding:6px 12px; border-bottom:1px solid var(--line);
-           background:var(--panel); }
-  .abrow .tag { width:1.2em; font-weight:600; color:var(--accent); }
-  .abrow.off .tag { color:var(--dim); }
-  .abrow.off select:not(.pick), .abrow.off label { opacity:.4; }
-  #transport { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
-  #transport button { min-width:2.4em; font-size:15px; line-height:1.1; }
   label { display:flex; gap:6px; align-items:center; white-space:nowrap; }
-  select, button { background:#202026; color:var(--fg); border:1px solid var(--line);
-                   border-radius:5px; padding:4px 9px; font:inherit; }
+  select, button, input[type=number] {
+      background:#202026; color:var(--fg); border:1px solid var(--line);
+      border-radius:5px; padding:4px 9px; font:inherit; }
   button { cursor:pointer; } button:hover { background:#2a2a33; }
   button:disabled { opacity:.4; cursor:default; }
   input[type=range] { accent-color:var(--accent); }
-  #ev { width:220px; } #tl { width:100%; }
+  input[type=number] { width:5.6em; text-align:right;
+                       font-variant-numeric:tabular-nums; }
   .k { color:var(--accent); font-variant-numeric:tabular-nums; }
   .dim { color:var(--dim); }
+
+  /* A and B in ONE grid, so their columns line up by construction rather than
+     by both happening to size their contents the same way. */
+  #ab { display:grid; align-items:center; gap:6px 10px;
+        grid-template-columns:1.2em minmax(8em,1.4fr) auto minmax(8em,1fr)
+                              auto minmax(8em,1.3fr) minmax(0,auto);
+        padding:8px 12px; border-bottom:1px solid var(--line);
+        background:var(--panel); }
+  #ab select { width:100%; min-width:0; }
+  #ab .tag { font-weight:600; color:var(--accent); }
+  #ab.boff .bcell { opacity:.4; }
+  #ab.boff #tagb { color:var(--dim); }
+
   #warn { color:var(--warn); padding:6px 12px; background:#241f14;
           border-bottom:1px solid var(--line); display:none; }
-  #stage { display:flex; justify-content:center; align-items:center;
+
+  #stage { display:flex; justify-content:center; align-items:stretch;
            background:#000; min-height:40vh; }
+  #evcol { display:flex; flex-direction:column; align-items:center; gap:8px;
+           padding:10px 12px; background:var(--panel);
+           border-right:1px solid var(--line); }
+  #evcol .cap { font-size:11px; letter-spacing:.04em; color:var(--dim);
+                text-transform:uppercase; }
+  /* Vertical range the standard way. Not also -webkit-appearance:slider-vertical:
+     every browser that ships WebCodecs also supports writing-mode here, and
+     setting both risks a double rotation in the ones that honour each. rtl puts
+     the minimum at the bottom, so up is brighter. */
+  #ev { writing-mode:vertical-lr; direction:rtl; width:26px; flex:1;
+        min-height:140px; }
+  #evstage { display:flex; justify-content:center; align-items:center;
+             flex:1; min-width:0; }
   canvas { display:block; max-width:100%; max-height:78vh; height:auto;
            touch-action:none; }
   canvas.wipeable { cursor:col-resize; }
+
+  #tlrow { display:flex; gap:10px; align-items:center; }
+  #tl { flex:1; min-width:0; }
+  #transport { display:grid; grid-template-columns:1fr auto 1fr;
+               align-items:center; gap:12px; }
+  #keys { display:flex; gap:6px; justify-content:center; }
+  #keys button { padding:3px 8px; line-height:0; }
+  #keys svg { width:18px; height:18px; display:block; }
+  #rate { display:flex; justify-content:flex-end; }
+
   #stats { font-family:ui-monospace,SFMono-Regular,monospace; white-space:pre;
-           color:var(--dim); font-size:12px; margin-top:6px; display:none; }
+           color:var(--dim); font-size:12px; display:none; }
   #load { position:fixed; inset:0; background:#0e0e10ee; display:none;
           align-items:center; justify-content:center; flex-direction:column; gap:10px; }
   #bar { width:280px; height:4px; background:#2a2a30; border-radius:2px; overflow:hidden; }
   #barf { height:100%; width:0; background:var(--accent); }
 </style>
-
 <header>
-  <label>exposure
-    <input id="ev" type="range" min="-10" max="10" step="0.01" value="0">
-    <span id="evv" class="k">+0.00</span></label>
-  <button id="evr" title="Exposure back to 0">reset</button>
+  <span id="meta" class="dim">—</span>
+  <span class="grow"></span>
   <span id="conn" class="dim">connecting…</span>
   <button id="statsb" title="Diagnostics">⚙︎</button>
 </header>
-<div class="abrow" id="rowa">
+
+<div id="ab" class="boff">
   <span class="tag">A</span>
-  <select id="seq" class="pick"><option value="">— sequence —</option></select>
-  <label>in <select id="src"></select></label>
-  <label>view <select id="view"></select></label>
+  <select id="seq"><option value="">— sequence —</option></select>
+  <span>in</span><select id="src"></select>
+  <span>view</span><select id="view"></select>
+  <span></span>
+  <span class="tag bcell" id="tagb">B</span>
+  <select id="seqb" class="bcell"><option value="">— none —</option></select>
+  <span class="bcell">in</span><select id="srcb" class="bcell"></select>
+  <span class="bcell">view</span><select id="viewb" class="bcell"></select>
+  <span id="cmpinfo" class="dim bcell"></span>
 </div>
-<div class="abrow off" id="rowb">
-  <span class="tag">B</span>
-  <select id="seqb" class="pick"><option value="">— none —</option></select>
-  <label>in <select id="srcb"></select></label>
-  <label>view <select id="viewb"></select></label>
-  <span id="cmpinfo" class="dim"></span>
-</div>
+
 <div id="warn"></div>
-<div id="stage"><canvas id="c"></canvas></div>
+
+<div id="stage">
+  <div id="evcol">
+    <span class="cap">exposure</span>
+    <input id="evv" type="number" min="-10" max="10" step="0.01" value="0.00">
+    <input id="ev" type="range" min="-10" max="10" step="0.01" value="0">
+    <button id="evr" title="Exposure back to 0">reset</button>
+  </div>
+  <div id="evstage"><canvas id="c"></canvas></div>
+</div>
+
 <footer>
-  <input id="tl" type="range" min="0" max="0" step="1" value="0" disabled>
+  <div id="tlrow">
+    <input id="tl" type="range" min="0" max="0" step="1" value="0" list="ticks" disabled>
+    <datalist id="ticks"></datalist>
+    <input id="posin" type="number" min="1" step="1" value="1" disabled>
+    <span class="dim">/ <span id="total">–</span></span>
+  </div>
   <div id="transport">
-    <button id="first" disabled title="First frame">⏮︎</button>
-    <button id="prev"  disabled title="Back one frame (←)">◀︎</button>
-    <button id="play"  disabled title="Play / pause (space)">⏵︎</button>
-    <button id="next"  disabled title="Forward one frame (→)">▶︎</button>
-    <button id="last"  disabled title="Last frame">⏭︎</button>
-    <label>sequence <select id="fps">
-      <option>23.976</option><option selected>24</option><option>25</option>
-      <option>29.97</option><option>30</option><option>48</option><option>60</option>
-    </select> fps</label>
-    <span id="pos" class="k">–</span> <span class="dim" id="meta"></span>
+    <span></span>
+    <div id="keys">
+      <button id="first" disabled title="First frame">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="2.2" height="14" fill="currentColor"/><path d="M15 5 7 12l8 7z" fill="currentColor"/><path d="M22 5l-8 7 8 7z" fill="currentColor"/></svg></button>
+      <button id="prev" disabled title="Back one frame (←)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 5 7 12l9 7z" fill="currentColor"/><rect x="17.8" y="5" width="2.2" height="14" fill="currentColor"/></svg></button>
+      <button id="play" disabled title="Play / pause (space)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4l13 8-13 8z" fill="currentColor"/></svg></button>
+      <button id="next" disabled title="Forward one frame (→)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="2.2" height="14" fill="currentColor"/><path d="M8 5l9 7-9 7z" fill="currentColor"/></svg></button>
+      <button id="last" disabled title="Last frame">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 5l8 7-8 7z" fill="currentColor"/><path d="M9 5l8 7-8 7z" fill="currentColor"/><rect x="17.8" y="5" width="2.2" height="14" fill="currentColor"/></svg></button>
+    </div>
+    <div id="rate">
+      <label>sequence <select id="fps">
+        <option>23.976</option><option selected>24</option><option>25</option>
+        <option>29.97</option><option>30</option><option>48</option><option>60</option>
+      </select> fps</label>
+    </div>
   </div>
   <div id="stats"></div>
 </footer>
-<div id="load"><div id="barf-wrap"><div id="bar"><div id="barf"></div></div></div>
+<div id="load"><div id="bar"><div id="barf"></div></div>
   <div id="loadtxt" class="dim">loading…</div></div>
 
 <script>
@@ -183,12 +235,15 @@ function tick(ts) {
 requestAnimationFrame(tick);
 
 function stats() {
-  $("#pos").textContent = ready ? `frame ${frameIdx + 1} / ${ready.frames}` : "–";
+  if (document.activeElement !== $("#posin"))
+    $("#posin").value = String(frameIdx + 1);
   $("#meta").textContent = ready
-    ? `· ${ready.compare ? "A|B · " : ""}${ready.w}×${ready.h} · ${ready.src_fps}\u2009fps${
-        ready.fps === ready.src_fps ? "" : ` (streamed at ${ready.fps}\u2009fps for ${ready.hz}\u2009Hz)`
-      } · ${ready.src} → ${ready.view} · cache ${ready.cache_gb} GB`
-    : "";
+    ? `${ready.name}${ready.compare ? " | " + ready.b_name : ""} · ${ready.w}×${ready.h}` +
+      ` · ${ready.src_fps}\u2009fps` +
+      (ready.fps === ready.src_fps ? "" :
+        ` (streamed ${ready.fps}\u2009fps for ${ready.hz}\u2009Hz)`) +
+      ` · ${ready.src} → ${ready.view} · cache ${ready.cache_gb} GB`
+    : "—";
   if ($("#stats").style.display === "none") return;
   // Rewriting the text node every 250 ms destroys any selection inside it,
   // which makes the numbers impossible to copy. Hold still while one is up.
@@ -264,7 +319,10 @@ function connect() {
     } else if (m.type === "ready") {
       $("#load").style.display = "none";
       ready = m; frameIdx = m.first;
-      $("#tl").max = m.frames - 1; $("#tl").value = 0; $("#tl").disabled = false;
+      $("#tl").max = m.frames - 1; $("#tl").value = m.first; $("#tl").disabled = false;
+      $("#posin").max = m.frames; $("#posin").disabled = false;
+      $("#total").textContent = String(m.frames);
+      setTicks(m.frames);
       for (const b of ["play","prev","next","first","last"]) $("#"+b).disabled = false;
       $("#fps").value = String(m.src_fps);
       if (m.b_key) {
@@ -290,6 +348,18 @@ function connect() {
     }
   };
 }
+
+// Native tick marks: a <datalist> on the range is what the platform provides
+// for this, so no track restyling. Strided, because a 2000-frame sequence would
+// otherwise ask the browser for 2000 of them and draw mush.
+function setTicks(n) {
+  const stride = Math.max(1, Math.ceil(n / 100));
+  $("#ticks").innerHTML = "";
+  for (let i = 0; i < n; i += stride)
+    $("#ticks").append(new Option("", String(i)));
+}
+
+function pause() { if (playing) $("#play").onclick(); }
 
 function note(text) {
   $("#warn").style.display = text ? "block" : "none";
@@ -318,29 +388,41 @@ function onFrame(pkt) {
 
 $("#seq").onchange = e => { if (e.target.value) send({ type:"open", key:e.target.value }); };
 function sendEv(v, final) {
-  $("#evv").textContent = (v>=0?"+":"") + v.toFixed(2);
+  if (document.activeElement !== $("#evv")) $("#evv").value = v.toFixed(2);
+  $("#ev").value = String(v);
   epoch++; pending = { epoch, t0: performance.now() };
   send({ type:"exposure", ev:v, epoch, final });
 }
+$("#evv").onchange = e => {
+  const v = Math.max(-10, Math.min(10, +e.target.value || 0));
+  e.target.value = v.toFixed(2);
+  sendEv(v, true);
+};
 $("#ev").oninput  = e => sendEv(+e.target.value, false);
 // change fires on release: the one event that must flush NVENC's pipeline so
 // the final value is what the viewer is actually looking at.
 $("#ev").onchange = e => sendEv(+e.target.value, true);
-$("#evr").onclick = () => { $("#ev").value = 0; sendEv(0, true); };
+$("#evr").onclick = () => sendEv(0, true);
 $("#play").onclick = () => {
   playing = !playing;
   if (!playing) { flushQ(); nextPresent = 0; }
-  $("#play").textContent = playing ? "⏸︎" : "⏵︎";
+  $("#play").innerHTML = playing
+    ? `<svg viewBox="0 0 24 24"><rect x="6.5" y="4" width="4" height="16" fill="currentColor"/><rect x="13.5" y="4" width="4" height="16" fill="currentColor"/></svg>`
+    : `<svg viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z" fill="currentColor"/></svg>`;
   $("#play").title = playing ? "Pause (space)" : "Play (space)";
   send({ type:"play", on: playing });
 };
-const pause = () => { if (playing) $("#play").onclick(); };
 const step = d => { pause(); send({ type:"step", delta:d }); };
 $("#prev").onclick = () => step(-1);
 $("#next").onclick = () => step(1);
 $("#first").onclick = () => { pause(); send({ type:"seek", frame:0 }); };
 $("#last").onclick = () => { pause(); send({ type:"seek", frame:ready.frames - 1 }); };
-$("#tl").oninput = e => { if (playing) $("#play").onclick(); send({ type:"seek", frame:+e.target.value }); };
+$("#tl").oninput = e => { pause(); send({ type:"seek", frame:+e.target.value }); };
+$("#posin").onchange = e => {
+  const n = Math.max(1, Math.min(ready ? ready.frames : 1, +e.target.value || 1));
+  e.target.value = String(n);
+  pause(); send({ type:"seek", frame:n - 1 });
+};
 $("#fps").onchange = e => send({ type:"fps", fps:+e.target.value });
 $("#src").onchange = e => send({ type:"look", src:e.target.value });
 $("#view").onchange = e => send({ type:"look", view:e.target.value });
@@ -373,7 +455,7 @@ for (const ev of ["pointerup", "pointercancel"])
 // takes the wipe cursor off the canvas, so the state is visible rather than
 // remembered.
 function setCompare(on, bFrames, aFrames) {
-  $("#rowb").classList.toggle("off", !on);
+  $("#ab").classList.toggle("boff", !on);
   for (const id of ["#srcb", "#viewb"]) $(id).disabled = !on;
   cv.classList.toggle("wipeable", !!on);
   $("#cmpinfo").textContent =

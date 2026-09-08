@@ -502,6 +502,29 @@ text rather than colour emoji.
 5. ~~**Stats becomes a cog.**~~ It is a settings/diagnostics affordance, not a
    noun.
 
+A second pass on the same row, after using it:
+
+6. **Exposure is a vertical slider beside the picture**, with the value as an
+   editable number rather than a readout. It is the control the tool exists for
+   and it was a horizontal strip in a row of dropdowns; next to the image, tall,
+   it reads as a fader. Vertical comes from `writing-mode`, not
+   `-webkit-appearance: slider-vertical` — every browser that ships WebCodecs
+   supports the former, and setting both risks a double rotation in the ones
+   that honour each.
+7. **A and B are one CSS grid, not two rows**, so their columns line up by
+   construction rather than by both happening to size their contents the same.
+8. **The timeline has native tick marks** (a `<datalist>`, strided to ~100 so a
+   2000-frame sequence does not ask the browser to draw mush) and an editable
+   frame number beside it.
+9. **Step and play stopped looking alike.** ⏵ for play and ▶ for step forward
+   differ only in size, which is not a distinction anyone should have to make at
+   a glance. They are inline SVG now: play is the only glyph with no bar, steps
+   carry a single bar on the leading edge, first and last a double triangle. SVG
+   also removes the question of how each glyph renders per platform.
+10. **Transport is centred** with a three-column grid, so it stays centred
+    whatever sits either side of it, and the status line moved to the top row
+    where the exposure slider used to be.
+
 Not in Phase 3: pan and zoom, which turned out to be a phase of its own, and
 anything that changes colour.
 
