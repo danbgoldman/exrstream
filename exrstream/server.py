@@ -43,13 +43,12 @@ class Session:
         self.src = app["args"].src
         self.view = gl.VIEW
         self.ev, self.epoch, self.frame = 0.0, 0, 0
-        self.resample = False
         # The B side of an A/B wipe: its own sequence and its own look, either
         # of which may match A's. One pane is a sequence plus a look, so
         # "compare two renders" and "compare two views" are the same feature.
         self.seq_b = self.frames_b = self.grade_b = None
         self.src_b = self.view_b = None
-        self.compare, self.wipe = False, 0.5
+        self.wipe = 0.5
         self.playing, self.dirty, self.jump = False, False, False
         self.flush_next = False
         self.settle_at = 0.0
@@ -62,6 +61,11 @@ class Session:
         self._pipe = deque()
         self.refresh_hz = 0.0
         self.seq_no = 0
+
+    @property
+    def compare(self):
+        """Comparing is having a B side, not a separate switch to forget."""
+        return self.frames_b is not None
 
     @property
     def inflight(self):
@@ -78,9 +82,6 @@ class Session:
     def retune(self):
         """Pick the encode rate for the measured refresh. True if it changed.
 
-        Resampling -- letting the sequence run at the display rate, which is
-        what "just play it at 30" means -- alters motion timing, so it is only
-        ever done when asked for.
         """
         was = self.out_fps
         self.out_fps = stream_fps(self.src_fps, self.refresh_hz)
@@ -90,11 +91,7 @@ class Session:
         """One output frame on. The source position moves at the SOURCE rate, so
         a 24 fps sequence streamed at 30 repeats one frame in five and still
         takes the same wall-clock time it would in any other player."""
-        # Resampling means one source frame per output frame regardless of
-        # rate, which is what makes it fast. `src_fps` stays the sequence's
-        # declared rate either way, or nothing could say by how much.
-        step = 1.0 if self.resample else self.src_fps / self.out_fps
-        self.pos = (self.pos + step) % len(self.frames)
+        self.pos = (self.pos + self.src_fps / self.out_fps) % len(self.frames)
         self.frame = int(self.pos)
 
     def seek(self, frame):
@@ -137,7 +134,6 @@ class Session:
         # encoder is built for A's geometry.
         if self.frames_b is not None and self.frames_b[0].shape[:2] != (self.h, self.w):
             self.seq_b = self.frames_b = self.grade_b = None
-            self.compare = False
         self.seek(0)
         self.retune()
         self._make_encoder()
@@ -152,12 +148,17 @@ class Session:
         self.src_b = self.src_b or self.src
         self.view_b = self.view_b or self.view
         self.grade_b = gl.grade_for(self.w, self.h, self.src_b, gl.DISPLAY, self.view_b)
-        self.compare = True
         # Every `ready` makes the client build a fresh VideoDecoder, so every
         # `ready` has to be followed by an IDR or that decoder meets a P-frame
         # with no reference and errors out. A B-side open sends one, so it needs
         # a fresh encoder too, even though the geometry has not changed.
         self._make_encoder()
+
+    def unbind_b(self):
+        """Drop the B side. No `ready`, so no new decoder and no new encoder --
+        the picture changes, which a flush already covers."""
+        self.seq_b = self.frames_b = self.grade_b = None
+        self.dirty = self.jump = self.flush_next = True
 
     def set_look(self, src=None, view=None, side="a"):
         if side == "b":
@@ -265,32 +266,27 @@ def stream_fps(src_fps, hz):
     return hz / max(1, round(hz / src_fps))
 
 
-def cadence_note(src_fps, out_fps, hz, resample):
-    """Say plainly what is being done to the footage, if anything.
+def cadence_note(src_fps, out_fps, hz):
+    """Warn only when the display cannot keep up, i.e. frames are being dropped.
 
-    Silence when the sequence rate divides the refresh, because then nothing is
-    being done and a warning would be noise.
+    Repeating frames to fill a faster refresh is not a problem and gets no
+    warning: the sequence still runs at its own rate, so nothing is lost and a
+    banner would be noise. The header states the two rates for anyone curious.
+    Dropping is different -- there are frames of the cut you are not being
+    shown, and no setting here can fix it.
     """
-    if not hz:
+    if not hz or out_fps >= src_fps - 0.01:
         return None
-    if resample:
-        return (f"Playing at the display rate: {out_fps:g} fps instead of "
-                f"{src_fps:g}, so motion runs "
-                f"{out_fps / src_fps:.2f}x speed. Smooth, but the timing is "
-                f"not the footage's.")
-    if abs(out_fps - src_fps) < 0.01:
-        return None
-    what = ("repeating" if out_fps > src_fps else "dropping")
-    every = out_fps / abs(out_fps - src_fps)
-    return (f"{src_fps:g} fps on a {hz:.0f} Hz display cannot be presented "
-            f"evenly, so the stream runs at {out_fps:g} fps, {what} one frame "
-            f"in {every:.1f}. The sequence still runs at {src_fps:g} fps -- "
-            f"motion timing is exact and the uneven cadence is inherent to "
-            f"{src_fps:g}-in-{hz:.0f}. Laptops on battery often cap refresh.")
+    return (f"This display refreshes at {hz:.0f} Hz, below the sequence's "
+            f"{src_fps:g} fps, so it is being played at {out_fps:g} fps and "
+            f"{1 - out_fps / src_fps:.0%} of the frames are not shown. "
+            f"{out_fps:g} fps is the most this display can present evenly; "
+            f"a faster one would show the rest. (Laptops on battery often cap "
+            f"refresh.)")
 
 
 def note_for(s):
-    return cadence_note(s.src_fps, s.out_fps, s.refresh_hz, s.resample)
+    return cadence_note(s.src_fps, s.out_fps, s.refresh_hz)
 
 
 def ready_msg(s, app, first=0, bad=None):
@@ -302,7 +298,7 @@ def ready_msg(s, app, first=0, bad=None):
     """
     return {"type": "ready", "w": s.w, "h": s.h, "frames": len(s.frames),
             "first": first, "fps": s.out_fps, "src_fps": s.src_fps,
-            "resample": s.resample, "hz": round(s.refresh_hz, 1),
+            "hz": round(s.refresh_hz, 1),
             "src": s.src, "view": s.view, "name": Path(s.seq.key).name,
             "cache_gb": round(app["cache"].bytes / 2**30, 2),
             "bad": bad or [], "note": note_for(s),
@@ -374,6 +370,13 @@ async def ws_handler(request):
             await asyncio.sleep(0.001)
 
     async def do_open(key, first, count, side="a"):
+        if side == "b" and not key:
+            # The empty entry in B's picker. Not a separate "stop comparing"
+            # control: B being unset is what not comparing means.
+            s.unbind_b()
+            await ws.send_json({"type": "state", "compare": False,
+                                "b_key": None, "b_name": None})
+            return
         if side == "b" and s.frames is None:
             await ws.send_json({"type": "error",
                                 "msg": "open a sequence before comparing one"})
@@ -462,10 +465,7 @@ async def ws_handler(request):
                 s.seek(s.frame + int(m["delta"]))
                 s.dirty = s.jump = s.flush_next = True
             elif t == "fps" and s.frames:
-                if "fps" in m:
-                    s.src_fps = max(1.0, float(m["fps"]))
-                if "resample" in m:
-                    s.resample = bool(m["resample"])
+                s.src_fps = max(1.0, float(m["fps"]))
                 s.retune()
                 s._make_encoder()
                 await ws.send_json(ready_msg(s, app))
@@ -475,15 +475,6 @@ async def ws_handler(request):
                     s.flush_next = True
                 except Exception as e:                        # noqa: BLE001
                     await ws.send_json({"type": "error", "msg": f"look: {e}"})
-            elif t == "compare" and s.frames:
-                # Deliberately not a `ready`: that would rebuild the decoder for
-                # a change that does not need one. The client only has to learn
-                # whether compare actually took effect, which it does not if no
-                # B side ever loaded.
-                s.compare = bool(m["on"]) and s.frames_b is not None
-                s.dirty = s.jump = s.flush_next = True
-                await ws.send_json({"type": "state", "compare": s.compare,
-                                    "wipe": s.wipe})
             elif t == "wipe" and s.frames:
                 s.wipe = max(0.0, min(1.0, float(m["wipe"])))
                 s.dirty = True

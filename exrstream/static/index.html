@@ -10,7 +10,18 @@
   header, footer { background:var(--panel); border-color:var(--line); }
   header { padding:8px 12px; display:flex; gap:14px; align-items:center;
            flex-wrap:wrap; border-bottom:1px solid var(--line); }
-  footer { padding:8px 12px; border-top:1px solid var(--line); }
+  footer { padding:8px 12px; border-top:1px solid var(--line);
+           display:flex; flex-direction:column; gap:8px; }
+  /* A and B are the same row twice, deliberately: identical widgets in the
+     same order, so the eye compares the values and not the layout. */
+  .abrow { display:flex; gap:12px; align-items:center; flex-wrap:wrap;
+           padding:6px 12px; border-bottom:1px solid var(--line);
+           background:var(--panel); }
+  .abrow .tag { width:1.2em; font-weight:600; color:var(--accent); }
+  .abrow.off .tag { color:var(--dim); }
+  .abrow.off select:not(.pick), .abrow.off label { opacity:.4; }
+  #transport { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  #transport button { min-width:2.4em; font-size:15px; line-height:1.1; }
   label { display:flex; gap:6px; align-items:center; white-space:nowrap; }
   select, button { background:#202026; color:var(--fg); border:1px solid var(--line);
                    border-radius:5px; padding:4px 9px; font:inherit; }
@@ -20,11 +31,6 @@
   #ev { width:220px; } #tl { width:100%; }
   .k { color:var(--accent); font-variant-numeric:tabular-nums; }
   .dim { color:var(--dim); }
-  #cmp { display:none; gap:14px; align-items:center; flex-wrap:wrap;
-         padding:8px 12px; background:var(--panel);
-         border-bottom:1px solid var(--line); }
-  #cmp.on { display:flex; }
-  #wipe { width:220px; }
   #warn { color:var(--warn); padding:6px 12px; background:#241f14;
           border-bottom:1px solid var(--line); display:none; }
   #stage { display:flex; justify-content:center; align-items:center;
@@ -41,38 +47,42 @@
 </style>
 
 <header>
-  <select id="seq"><option value="">— sequence —</option></select>
-  <button id="play" disabled>play</button>
-  <button id="prev" disabled>◀</button>
-  <button id="next" disabled>▶</button>
   <label>exposure
     <input id="ev" type="range" min="-10" max="10" step="0.01" value="0">
     <span id="evv" class="k">+0.00</span></label>
-  <button id="evr">reset</button>
+  <button id="evr" title="Exposure back to 0">reset</button>
+  <span id="conn" class="dim">connecting…</span>
+  <button id="statsb" title="Diagnostics">⚙︎</button>
+</header>
+<div class="abrow" id="rowa">
+  <span class="tag">A</span>
+  <select id="seq" class="pick"><option value="">— sequence —</option></select>
   <label>in <select id="src"></select></label>
   <label>view <select id="view"></select></label>
-  <label>sequence <select id="fps">
-    <option>23.976</option><option selected>24</option><option>25</option>
-    <option>29.97</option><option>30</option><option>48</option><option>60</option>
-  </select> fps</label>
-  <label title="Runs the sequence at the display rate. Smoother, but the motion
-is no longer the footage's."><input id="resample" type="checkbox"> match display</label>
-  <span id="conn" class="dim">connecting…</span>
-  <button id="cmpb">compare</button>
-  <button id="statsb">stats</button>
-</header>
-<div id="cmp">
-  <label>B <select id="seqb"><option value="">— sequence —</option></select></label>
+</div>
+<div class="abrow off" id="rowb">
+  <span class="tag">B</span>
+  <select id="seqb" class="pick"><option value="">— none —</option></select>
   <label>in <select id="srcb"></select></label>
   <label>view <select id="viewb"></select></label>
-  <label>wipe <input id="wipe" type="range" min="0" max="1" step="0.002" value="0.5"></label>
   <span id="cmpinfo" class="dim"></span>
 </div>
 <div id="warn"></div>
 <div id="stage"><canvas id="c"></canvas></div>
 <footer>
   <input id="tl" type="range" min="0" max="0" step="1" value="0" disabled>
-  <div><span id="pos" class="k">–</span> <span class="dim" id="meta"></span></div>
+  <div id="transport">
+    <button id="first" disabled title="First frame">⏮︎</button>
+    <button id="prev"  disabled title="Back one frame (←)">◀︎</button>
+    <button id="play"  disabled title="Play / pause (space)">⏵︎</button>
+    <button id="next"  disabled title="Forward one frame (→)">▶︎</button>
+    <button id="last"  disabled title="Last frame">⏭︎</button>
+    <label>sequence <select id="fps">
+      <option>23.976</option><option selected>24</option><option>25</option>
+      <option>29.97</option><option>30</option><option>48</option><option>60</option>
+    </select> fps</label>
+    <span id="pos" class="k">–</span> <span class="dim" id="meta"></span>
+  </div>
   <div id="stats"></div>
 </footer>
 <div id="load"><div id="barf-wrap"><div id="bar"><div id="barf"></div></div></div>
@@ -255,20 +265,14 @@ function connect() {
       $("#load").style.display = "none";
       ready = m; frameIdx = m.first;
       $("#tl").max = m.frames - 1; $("#tl").value = 0; $("#tl").disabled = false;
-      for (const b of ["play","prev","next"]) $("#"+b).disabled = false;
+      for (const b of ["play","prev","next","first","last"]) $("#"+b).disabled = false;
       $("#fps").value = String(m.src_fps);
-      $("#resample").checked = m.resample;
       if (m.b_key) {
         $("#seqb").value = m.b_key;
         $("#srcb").value = m.b_src; $("#viewb").value = m.b_view;
       }
       wipe = m.wipe;
-      $("#wipe").value = String(m.wipe);
-      cv.classList.toggle("wipeable", !!m.compare);
-      $("#cmpinfo").textContent = m.b_name
-        ? `A ${m.name} (${m.frames}f) | B ${m.b_name} (${m.b_frames}f)` +
-          (m.b_frames < m.frames ? " — B is shorter; its last frame is held" : "")
-        : "pick a B sequence";
+      setCompare(m.compare, m.b_frames, m.frames);
       setupDecoder();
       const bad = (m.bad && m.bad.length)
         ? `${m.bad.length} frame(s) unreadable and shown black (first at ${m.bad[0]}). `
@@ -277,7 +281,7 @@ function connect() {
       stats();
     } else if (m.type === "state") {
       if (ready) Object.assign(ready, m);
-      cv.classList.toggle("wipeable", !!m.compare);
+      setCompare(m.compare, ready && ready.b_frames, ready && ready.frames);
     } else if (m.type === "note") { note(m.note); }
     else if (m.type === "error") {
       $("#load").style.display = "none";
@@ -326,24 +330,24 @@ $("#evr").onclick = () => { $("#ev").value = 0; sendEv(0, true); };
 $("#play").onclick = () => {
   playing = !playing;
   if (!playing) { flushQ(); nextPresent = 0; }
-  $("#play").textContent = playing ? "pause" : "play";
+  $("#play").textContent = playing ? "⏸︎" : "⏵︎";
+  $("#play").title = playing ? "Pause (space)" : "Play (space)";
   send({ type:"play", on: playing });
 };
-const step = d => { if (playing) $("#play").onclick(); send({ type:"step", delta:d }); };
+const pause = () => { if (playing) $("#play").onclick(); };
+const step = d => { pause(); send({ type:"step", delta:d }); };
 $("#prev").onclick = () => step(-1);
 $("#next").onclick = () => step(1);
+$("#first").onclick = () => { pause(); send({ type:"seek", frame:0 }); };
+$("#last").onclick = () => { pause(); send({ type:"seek", frame:ready.frames - 1 }); };
 $("#tl").oninput = e => { if (playing) $("#play").onclick(); send({ type:"seek", frame:+e.target.value }); };
-const sendRate = () => send({ type:"fps", fps:+$("#fps").value,
-                             resample: $("#resample").checked });
-$("#fps").onchange = sendRate;
-$("#resample").onchange = sendRate;
+$("#fps").onchange = e => send({ type:"fps", fps:+e.target.value });
 $("#src").onchange = e => send({ type:"look", src:e.target.value });
 $("#view").onchange = e => send({ type:"look", view:e.target.value });
 // Drag the seam on the picture itself. The canvas is letterboxed by CSS, so
 // the split comes from its rendered box, not its pixel width.
 function setWipe(v, final) {
   wipe = Math.max(0, Math.min(1, v));
-  $("#wipe").value = String(wipe);
   send({ type:"wipe", wipe, final });
 }
 function wipeAt(e) {
@@ -351,7 +355,7 @@ function wipeAt(e) {
   return (e.clientX - r.left) / r.width;
 }
 cv.addEventListener("pointerdown", e => {
-  if (!ready || !ready.compare) return;
+  if (!ready || !ready.compare) return;   // no B side, no seam to grab
   dragging = true;
   cv.setPointerCapture(e.pointerId);
   setWipe(wipeAt(e), false);
@@ -365,20 +369,22 @@ for (const ev of ["pointerup", "pointercancel"])
     setWipe(wipeAt(e), true);      // the one event that must flush the encoder
   });
 
-$("#cmpb").onclick = () => {
-  const on = $("#cmp").classList.toggle("on");
-  $("#cmpb").className = on ? "k" : "";
-  // Only tell the server when there is actually a B side; otherwise the panel
-  // is just open so you can pick one.
-  if (!on || $("#seqb").value) send({ type:"compare", on });
-};
-$("#seqb").onchange = e => {
-  if (e.target.value) send({ type:"open", key:e.target.value, side:"b" });
-};
+// Comparing is having a B side, not a switch. Empty B greys its own row and
+// takes the wipe cursor off the canvas, so the state is visible rather than
+// remembered.
+function setCompare(on, bFrames, aFrames) {
+  $("#rowb").classList.toggle("off", !on);
+  for (const id of ["#srcb", "#viewb"]) $(id).disabled = !on;
+  cv.classList.toggle("wipeable", !!on);
+  $("#cmpinfo").textContent =
+    on && bFrames < aFrames ? `B is ${bFrames}f to A's ${aFrames}f — its last frame is held`
+    : on ? "drag the seam on the picture"
+    : "";
+}
+$("#seqb").onchange = e => send({ type:"open", key:e.target.value, side:"b" });
 $("#srcb").onchange = e => send({ type:"look", side:"b", src:e.target.value });
 $("#viewb").onchange = e => send({ type:"look", side:"b", view:e.target.value });
-$("#wipe").oninput  = e => setWipe(+e.target.value, false);
-$("#wipe").onchange = e => setWipe(+e.target.value, true);
+
 $("#statsb").onclick = () => {
   const s = $("#stats"); s.style.display = s.style.display === "none" ? "block" : "none"; stats();
 };

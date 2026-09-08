@@ -49,8 +49,10 @@ async def main(url="https://127.0.0.1:8099"):
             print(f"  ready: {m['w']}x{m['h']} {m['frames']}f fps={m['fps']} cache={m['cache_gb']}GB")
             assert m["src_fps"] == 24 and m["fps"] == 30, \
                 f"24 fps on 30 Hz must stream at 30: {m['src_fps']} -> {m['fps']}"
-            assert m["note"] and "repeating" in m["note"], m["note"]
-            print(f"  24fps on 30Hz negotiated to a 30fps stream, and says so")
+            # Repeating to fill a faster refresh loses nothing, so it must not
+            # raise a banner; the rates are reported and that is all.
+            assert not m["note"], f"repeats must not warn: {m['note']}"
+            print(f"  24fps on 30Hz negotiated to a 30fps stream, silently")
 
             async def next_frame(timeout=10):
                 while True:
@@ -142,6 +144,22 @@ async def main(url="https://127.0.0.1:8099"):
                 f"a 30fps sequence on 30Hz needs no repeats and no note: {m['note']}"
             print("  30fps sequence on 30Hz: streamed as-is, nothing to report")
 
+            # 48 fps on a 30 Hz display drops frames, and that must be said.
+            await ws.send_json({"type": "fps", "fps": 48})
+            while True:
+                r = await asyncio.wait_for(ws.receive(), 10)
+                if r.type is aiohttp.WSMsgType.BINARY:
+                    await ws.send_json({"type": "ack",
+                                        "seq": HDR.unpack_from(r.data, 0)[4]})
+                    continue
+                m = json.loads(r.data)
+                if m["type"] == "ready":
+                    break
+            assert m["fps"] == 30 and m["note"] and "not shown" in m["note"], m
+            print(f"  dropped frames warned: {m['note'][:58]}...")
+            await ws.send_json({"type": "fps", "fps": 24})
+            await burst()
+
             await ws.send_json({"type": "look", "src": "ACES2065-1"})
             (fr, *_), body = await next_frame()
             assert body, "no frame after colourspace change"
@@ -192,6 +210,22 @@ async def main(url="https://127.0.0.1:8099"):
                     break
             assert m["type"] == "error" and "frame size" in m["msg"], m
             print(f"  mismatched B size refused: {m['msg']}")
+
+            # Empty B is what "stop comparing" means; there is no toggle.
+            await ws.send_json({"type": "open", "key": "", "side": "b"})
+            while True:
+                r = await asyncio.wait_for(ws.receive(), 30)
+                if r.type is aiohttp.WSMsgType.BINARY:
+                    await ws.send_json({"type": "ack",
+                                        "seq": HDR.unpack_from(r.data, 0)[4]})
+                    continue
+                m = json.loads(r.data)
+                if m["type"] == "state":
+                    break
+            assert m["compare"] is False and m["b_name"] is None, m
+            (fr, *_), body = await next_frame()
+            assert body, "no frame after clearing B"
+            print("  clearing B stops the comparison and keeps streaming")
     print("OK")
 
 

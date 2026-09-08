@@ -25,7 +25,7 @@ def _sess(frames_a, frames_b, wipe=0.5, view_b=None):
     s.w, s.h, s.ev = W, H, 0.0
     s.src, s.view = SRC, gl.VIEW
     s.frames, s.frames_b = frames_a, frames_b
-    s.frame, s.compare, s.wipe = 0, frames_b is not None, wipe
+    s.frame, s.wipe = 0, wipe
     s.grade = gl.grade_for(W, H, SRC, gl.DISPLAY, gl.VIEW)
     s.src_b, s.view_b = SRC, view_b or gl.VIEW
     s.grade_b = gl.grade_for(W, H, SRC, gl.DISPLAY, s.view_b)

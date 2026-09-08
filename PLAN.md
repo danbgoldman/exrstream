@@ -447,21 +447,27 @@ them, not by appeal.
    realtime cold as well as warm. What remains is only a RAM-capacity question
    for sequences too long to cache, which is a different feature.
 
-## Phase 3 — the viewer as an instrument
+## Phase 3 — the viewer as an instrument — built
 
 Phase 1 and 2 built a correct picture and put every control in one row above it.
-That row is now the least considered part of the tool. These are cosmetic in the
+That row was the least considered part of the tool. These are cosmetic in the
 sense that none of them changes a pixel, and not cosmetic in the sense that a
 review tool is mostly the experience of scrubbing and comparing.
 
-1. **Transport controls move below the picture**, with the frame rate selector,
+The layout that came out of it: **above the picture, what changes the picture**
+(exposure, then A and B as one identical row each). **Below it, where you are in
+it** — timeline, transport, sequence rate. Glyphs carry U+FE0E so they render as
+text rather than colour emoji.
+
+1. ~~**Transport controls move below the picture**, with the frame rate selector,
    and take standard glyphs: ⏮ ◀ ⏵/⏸ ▶ ⏭. Controls under the image is what every
    player does, and it puts them next to the timeline they act on. What is left
    above is what changes the *picture* — sequence, colourspace, view — which is
    a real distinction rather than a tidy-up: the top row alters what you are
-   looking at, the bottom row alters where you are in it.
+   looking at, the bottom row alters where you are in it.~~ First and last frame
+   buttons came along with the glyph set, since ⏮ and ⏭ imply them.
 
-2. **Drop "match display"; warn instead when the display cannot keep up.**
+2. ~~**Drop "match display"; warn instead when the display cannot keep up.**
    Resampling is the one control that lies about motion, and since the stream
    rate already repeats frames to hold the sequence at its own speed, it exists
    only to make things smooth by making them wrong. Removing it removes the
@@ -472,23 +478,29 @@ review tool is mostly the experience of scrubbing and comparing.
    repeats, with nothing to warn about. The case that deserves a warning is
    `out_fps < src_fps` — the refresh is *below* the sequence rate, so frames are
    being dropped and you are not seeing the cut. Say which rate the display can
-   actually sustain, and that the footage is not being shown in full.
+   actually sustain, and that the footage is not being shown in full.~~ So
+   24-on-30 is now silent, where it used to explain itself at length: the header
+   states both rates and there is nothing wrong. 48-on-30 says which fraction of
+   the frames you are not being shown.
 
-3. **Delete the wipe slider.** The seam is dragged on the picture; a second
+3. ~~**Delete the wipe slider.** The seam is dragged on the picture; a second
    control for the same value is a thing to keep in sync for no benefit. Note
    that this books a collision with Phase 4, where drag also means pan; the
-   resolution is a grab zone around the seam, and it is Phase 4's problem.
+   resolution is a grab zone around the seam, and it is Phase 4's problem.~~
 
-4. **A and B become the same control row, twice.** `sequence · in · view` on
+4. ~~**A and B become the same control row, twice.** `sequence · in · view` on
    each side, identical widgets, and the compare toggle goes away: B's sequence
    pulldown gains an empty entry, and *B set* is what "compare" means. Empty
    greys out B's look controls and disables wiping. One less piece of state, and
    the state that remains is visible rather than inferred from a highlighted
-   button. Server side, `compare` stops being a field and becomes
-   `frames_b is not None`; clearing B needs an unbind path, which does not exist
-   yet.
+   button.~~ Server side `compare` is now a property returning
+   `frames_b is not None`, so the state cannot disagree with itself, and the
+   empty entry in B's picker is the unbind path. Clearing B sends a `state`
+   rather than a `ready`: the picture changes, which a flush covers, and there
+   is no reason to rebuild the client's decoder for it.
 
-5. **Stats becomes a cog.** It is a settings/diagnostics affordance, not a noun.
+5. ~~**Stats becomes a cog.**~~ It is a settings/diagnostics affordance, not a
+   noun.
 
 Not in Phase 3: pan and zoom, which turned out to be a phase of its own, and
 anything that changes colour.
