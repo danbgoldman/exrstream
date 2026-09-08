@@ -116,6 +116,13 @@ Requires an NVIDIA GPU with a hardware video encoder. Developed on an NVIDIA
 GB10; ffmpeg is not used anywhere. The GB10's unified memory flatters two stages
 of the pipeline, so `PLAN.md` estimates what a discrete card would cost.
 
+## License
+
+MIT — see [LICENSE](LICENSE). The dependencies keep their own: OpenImageIO and
+OpenColorIO are BSD-3-Clause, aiohttp Apache-2.0, NumPy and PyOpenGL BSD, and
+PyNvVideoCodec ships under NVIDIA's own software licence agreement, which is
+worth reading if you plan to redistribute a bundle rather than a source tree.
+
 ## Credits
 
 Test footage is from *Tears of Steel*, (CC) Blender Foundation |
