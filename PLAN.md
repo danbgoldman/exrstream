@@ -475,7 +475,9 @@ review tool is mostly the experience of scrubbing and comparing.
    actually sustain, and that the footage is not being shown in full.
 
 3. **Delete the wipe slider.** The seam is dragged on the picture; a second
-   control for the same value is a thing to keep in sync for no benefit.
+   control for the same value is a thing to keep in sync for no benefit. Note
+   that this books a collision with Phase 4, where drag also means pan; the
+   resolution is a grab zone around the seam, and it is Phase 4's problem.
 
 4. **A and B become the same control row, twice.** `sequence · in · view` on
    each side, identical widgets, and the compare toggle goes away: B's sequence
@@ -488,26 +490,80 @@ review tool is mostly the experience of scrubbing and comparing.
 
 5. **Stats becomes a cog.** It is a settings/diagnostics affordance, not a noun.
 
-6. **Pan and zoom on the canvas**, with a reset button beside the transport
-   controls. Drag to pan, wheel to zoom, ctrl+wheel for trackpad pinch.
+Not in Phase 3: pan and zoom, which turned out to be a phase of its own, and
+anything that changes colour.
 
-   **This collides with item 3, and the collision is the whole design problem:**
-   drag now means both "move the wipe" and "pan". The standard answer, and the
-   one to take, is that the seam has a grab zone — a drag starting within a few
-   pixels of it moves the wipe, anything else pans. It also means the seam
-   wants to be visible enough to aim at, which the current 1px-ish line
-   already manages.
+## Phase 4 — pan and zoom, properly
 
-   **Known ceiling, worth stating before it surprises someone:** a client-side
-   zoom magnifies *decoded video*, not the EXR. Push into a highlight at 4:1 and
-   you are looking at interpolated 8-bit 4:2:0, which is exactly the kind of
-   confident-but-wrong answer this tool exists to avoid. It is still worth
-   having — framing and composition do not need source pixels — but real pixel
-   inspection means rendering a server-side region of interest at native
-   resolution, which is a different feature and belongs in its own item. Label
-   the zoom factor in the UI so it is never ambiguous which one you are getting.
+Zoom looked like a Phase 3 checkbox and is not. A client-side transform is
+responsive and magnifies *decoded* video — interpolated 8-bit 4:2:0 — which is
+the confidently-wrong answer this tool exists to prevent. A server-side render
+of the region is pixel-accurate and arrives a round trip late. **Both are
+required, and the interesting part is the handoff between them.**
 
-Not in Phase 3: server-side ROI zoom (above), and anything that changes colour.
+### The server renders a region; the frame carries the region it rendered
+
+The encoder is built for one output size and **never changes size**, which is
+what makes this cheap: zooming is not a different-sized picture, it is a
+different *source rectangle* rendered into the same one. In the shader that is
+two uniforms — sample `roi.xy + gl_FragCoord.xy/res * roi.zw` instead of
+`gl_FragCoord.xy/res`. No encoder rebuild, no IDR, no bitrate change.
+
+**The region must travel with the frame, in the packet header.** This is the
+same trap the pipeline already has a mechanism for: NVENC returns the packet for
+the frame pushed three pushes earlier, so a packet labelled with the session's
+*current* region would paint the wrong rectangle and the picture would slide
+around under a pan. The region belongs in `Meta` and in the header beside
+frame/epoch/ev/flags/seq — `<IIfII>` becomes `<IIfII4f>`, 20 bytes to 36 — in
+normalised source coordinates, so the client needs to know nothing about the
+source size to place it.
+
+### The handoff is the feature
+
+During a gesture the client transforms the last decoded frame at once: correct
+framing, stale pixels. The server answers a round trip later with a frame whose
+header says which rectangle it actually contains. So **every paint is
+`drawImage(frame, srcRect → dstRect)` derived from (region received, region
+wanted)**, and the two agree in the steady state. Painting that way rather than
+switching modes is what removes the snap when the server catches up: a frame
+that is one gesture behind is simply drawn slightly wrong, and the next one is
+not.
+
+Gesture discipline is the exposure slider's, unchanged: coalesce during the
+drag, flush on release, settle timer as the backstop. A pan needs no new
+rate-limiting either, since it changes what is rendered rather than how often.
+
+### Things worth knowing before building it
+
+- **A pan is cheap for the codec and a zoom is not.** Translation is what motion
+  vectors are for; scaling is not, so a pinch will cost more bits than a drag of
+  the same magnitude. Watch the drag-quality question return here, having been
+  correctly dismissed for the exposure slider.
+- **Zooming out past fit introduces minification**, which today never happens —
+  the output is source-sized and the browser does the shrinking. A region larger
+  than the source sampled through `GL_NEAREST` will alias badly, so this wants
+  `GL_LINEAR` plus mipmaps, or a floor at fit. Magnification must stay
+  `GL_NEAREST`: at 4:1 you want to see pixels, not a smooth lie about them.
+- **Pixel-accurate still is not lossless.** A server-rendered region is real
+  source pixels, but they still cross an 8-bit 4:2:0 codec at 15 Mbps. The
+  natural companion is a lossless still of the region on pause — and at high
+  zoom the region is small, so it is cheap. That is the "reference mode" the
+  mezzanine section already argues for, arriving from a different direction.
+- **A/B pans as one.** The region applies to both panes; comparing two
+  differently-framed images is not comparing. This is also where Phase 3's
+  deleted wipe slider is paid for: the seam needs a grab zone so a drag near it
+  wipes and a drag elsewhere pans.
+- **Label the zoom factor.** With two zoom paths that look identical and differ
+  in truthfulness, the UI has to say which one is on screen — "2:1" when the
+  server has caught up, and visibly provisional when it has not.
+
+### Order
+
+Client-side transform first, with the factor labelled and the limitation stated:
+it is most of the usefulness (framing, navigation) for a fraction of the work,
+and it is a complete feature on its own. Then the region in the header and the
+server render, which turns the same gesture pixel-accurate without changing how
+it feels.
 
 ## Two rates, and why they are not the same number
 
