@@ -528,7 +528,7 @@ A second pass on the same row, after using it:
 Not in Phase 3: pan and zoom, which turned out to be a phase of its own, and
 anything that changes colour.
 
-## Phase 4 — pan and zoom, properly
+## Phase 4 — pan and zoom, properly — built
 
 Zoom looked like a Phase 3 checkbox and is not. A client-side transform is
 responsive and magnifies *decoded* video — interpolated 8-bit 4:2:0 — which is
@@ -599,6 +599,39 @@ it is most of the usefulness (framing, navigation) for a fraction of the work,
 and it is a complete feature on its own. Then the region in the header and the
 server render, which turns the same gesture pixel-accurate without changing how
 it feels.
+
+### As built
+
+Both halves, since the second is what makes the first honest. The design above
+survived contact; three things are worth adding to it.
+
+**Zooming is free.** Rendering a region costs the same as rendering the whole
+frame — 6.74 ms at 4K fitted, 6.64 ms at 8x — because the work is per output
+pixel and the output never changes size. A smaller region reads less texture, so
+it is a fraction *faster*. The encoder is untouched, so bitrate is unchanged too.
+
+**The region is one scalar plus an origin**, `(x, y, side)`, because the canvas
+carries the source's aspect ratio: a square fraction of a normalised source is a
+source-aspect rectangle. Four floats would have been two of them free to
+disagree.
+
+**`imageSmoothingEnabled` is set from the direction of the mismatch.** While the
+server catches up the client is magnifying an older frame, and smoothing that is
+right — it is admittedly an approximation. Once the regions agree the draw is
+1:1 and smoothing is off, so at rest you are looking at pixels. The status line
+says `4.0×` when settled and `4.0× (catching up)` when not, which is the label
+the design asked for.
+
+Clamps rather than refusals here, because a gesture has no sensible error
+message: the region is held inside the source and between fit and 32x. Fit is
+the floor deliberately — zooming out past it needs minification the shader does
+not do.
+
+A load-time smoke test for the client came out of this (`static/smoke.js`, run
+under node). Two bugs shipped in this phase that only a browser would have
+caught — a handler bound to an element that was never added to the markup, and a
+`const` used before its declaration, which throws at load and kills the entire
+script. Neither is visible to a Python test suite, and both are caught now.
 
 ## Two rates, and why they are not the same number
 

@@ -129,13 +129,18 @@ class Grade:
             language=ocio.GPU_LANGUAGE_GLSL_4_0)
         self.proc.getDefaultGPUProcessor().extractGpuShaderInfo(self.desc)
 
+        # `roi` is the source rectangle to fill the output with: xy is the
+        # top-left corner and z the side, both as a fraction of the source.
+        # (0,0,1) is the whole frame. Zooming is this, not a different output
+        # size, which is why it needs no new encoder.
         frag = f"""#version 430 core
 uniform sampler2D img;
 uniform vec2 res;
+uniform vec3 roi;
 out vec4 fragColor;
 {self.desc.getShaderText()}
 void main(){{
-    vec4 c = texture(img, gl_FragCoord.xy/res);
+    vec4 c = texture(img, roi.xy + (gl_FragCoord.xy/res) * roi.z);
     fragColor = {self.desc.getFunctionName()}(c);
 }}"""
         p = glCreateProgram()
@@ -188,6 +193,8 @@ void main(){{
 
         glUniform1i(glGetUniformLocation(self.prog, "img"), 0)
         glUniform2f(glGetUniformLocation(self.prog, "res"), float(w), float(h))
+        self._roi_loc = glGetUniformLocation(self.prog, "roi")
+        self.roi = None
         self._ev_prop = self.desc.getDynamicProperty(ocio.DYNAMIC_PROPERTY_EXPOSURE)
         self.ev = None
         self.set_exposure(0.0)
@@ -229,13 +236,22 @@ void main(){{
             if u.type == ocio.UNIFORM_DOUBLE:
                 glUniform1f(glGetUniformLocation(self.prog, name), float(u.getDouble()))
 
-    def render(self, rgba, fbo=None, scissor=None):
+    def set_roi(self, roi):
+        if roi == self.roi:
+            return
+        self.roi = roi
+        glUseProgram(self.prog)
+        glUniform3f(self._roi_loc, *roi)
+
+    def render(self, rgba, fbo=None, scissor=None, roi=(0.0, 0.0, 1.0)):
         """Grade one frame into `fbo` (this grade's own by default).
 
         `fbo` is a parameter so an A/B wipe can put two differently-graded
         images in one buffer: draw A, then draw B with a scissor over the other
-        side. `scissor` is (x, y, w, h) in pixels.
+        side. `scissor` is (x, y, w, h) in pixels. `roi` is the source rectangle
+        to magnify, as (x, y, side) fractions of the source.
         """
+        self.set_roi(roi)
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D, self.tex)
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.w, self.h,

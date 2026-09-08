@@ -100,6 +100,12 @@ failure mode this tool has.
   client queues ~200 ms of frames during playback, so the index rides through
   the decoder in `idxQ` (safe because `bf=0` means decode order is output
   order). Updating it from `onFrame` runs the slider ahead of the picture.
+- Zoom is a source *region* rendered into the same output size, never a
+  different output size, so it needs no new encoder and costs nothing -- 6.74 ms
+  at 4K fitted, 6.64 at 8x. The region rides in the packet header (`<IIfII3f>`)
+  for the same reason the exposure does: NVENC hands back the frame pushed three
+  pushes ago, so a packet labelled with the session's current region would paint
+  an old picture into a new rectangle.
 - A/B is two scissored draws into A's framebuffer, so it needs no second encoder
   and no second readback. `Grade.render(img, fbo=, scissor=)` is split out from
   `Grade.read()` for exactly this; `__call__` is still both.

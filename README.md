@@ -86,6 +86,13 @@ are graded on the GPU into one frame, so a comparison costs one extra draw and
 nothing at all in bitrate, and the exposure slider still moves both sides
 together.
 
+**Zoom shows real pixels, eventually.** Drag to pan, wheel or pinch to zoom.
+The picture follows your hand immediately by stretching the frame it already
+has, and a moment later the server re-renders that region from the EXR at full
+resolution and it sharpens. The zoom factor is labelled, and says when it is
+still catching up — a magnified video frame and a magnified source frame look
+similar and are not the same answer.
+
 **It refuses rather than guesses.** EXRs carry no colourspace metadata, so the
 input colourspace is something you tell it, not something it infers. Mixed
 resolutions in a sequence are rejected. Frames it cannot read — a render still

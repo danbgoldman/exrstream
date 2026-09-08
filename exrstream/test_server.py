@@ -3,7 +3,7 @@ the UI can send, so the browser only has to prove it looks right."""
 import asyncio, json, ssl, struct, sys, time
 import aiohttp
 
-HDR = struct.Struct("<IIfII")
+HDR = struct.Struct("<IIfII3f")
 
 
 def nals(b):
@@ -62,7 +62,7 @@ async def main(url="https://127.0.0.1:8099"):
                         await ws.send_json({"type": "ack", "seq": h[4]})
                         return h, r.data[HDR.size:]
 
-            (fr, ep, ev, fl, _sq), body = await next_frame()
+            (fr, ep, ev, fl, _sq, *_roi), body = await next_frame()
             assert 5 in nals(body) and 7 in nals(body), f"first frame not IDR+SPS: {nals(body)}"
             print("  first frame is IDR with in-band SPS/PPS")
 
@@ -71,7 +71,7 @@ async def main(url="https://127.0.0.1:8099"):
                 await ws.send_json({"type": "exposure", "ev": -3 + 0.5 * k,
                                     "epoch": k + 1, "final": final})
                 while True:
-                    (fr, ep, ev, fl, _sq), _ = await next_frame()
+                    (fr, ep, ev, fl, _sq, *_roi), _ = await next_frame()
                     if ep == k + 1:
                         return (time.perf_counter() - t0) * 1e3
 
@@ -185,7 +185,7 @@ async def main(url="https://127.0.0.1:8099"):
             # Every `ready` rebuilds the client's decoder, so every `ready` must
             # be followed by a key frame or that decoder meets a P-frame with no
             # reference and errors out.
-            (fr, ep, ev, fl, _sq), body = await next_frame()
+            (fr, ep, ev, fl, _sq, *_roi), body = await next_frame()
             assert fl == 1 and 7 in nals(body), \
                 "the frame after a B-side open must be an IDR with SPS/PPS"
             print(f"  B side loaded, playhead held at {m['first']}, IDR sent")
@@ -210,6 +210,33 @@ async def main(url="https://127.0.0.1:8099"):
                     break
             assert m["type"] == "error" and "frame size" in m["msg"], m
             print(f"  mismatched B size refused: {m['msg']}")
+
+            # Zoom: the region must come back in the header of the frame that
+            # actually contains it, not be read off the session at send time.
+            await ws.send_json({"type": "roi", "x": 0.25, "y": 0.5,
+                                "s": 0.25, "final": True})
+            got = await burst()
+            assert got, "no frame after a zoom"
+            rx, ry, rs = got[-1][5:]
+            assert (round(rx, 4), round(ry, 4), round(rs, 4)) == (0.25, 0.5, 0.25), \
+                f"header carried region {(rx, ry, rs)}"
+            # The flushed frames ahead of it must carry the region they were
+            # rendered with, not the one now set -- otherwise the client paints
+            # an old picture into a new rectangle and it slides under a pan.
+            assert got[0][5:] != got[-1][5:] or len(got) == 1, \
+                "every flushed frame reported the newest region"
+            print(f"  region {rx:g},{ry:g},{rs:g} rides in the packet header")
+
+            # Clamped to something showable rather than dropped or obeyed.
+            await ws.send_json({"type": "roi", "x": 0.9, "y": 0.9,
+                                "s": 0.5, "final": True})
+            got = await burst()
+            rx, ry, rs = got[-1][5:]
+            assert abs(rx - 0.5) < 1e-4 and abs(ry - 0.5) < 1e-4, \
+                f"region not clamped inside the source: {(rx, ry, rs)}"
+            await ws.send_json({"type": "roi", "x": 0, "y": 0, "s": 1, "final": True})
+            await burst()
+            print("  a region past the edge is clamped, not dropped")
 
             # Empty B is what "stop comparing" means; there is no toggle.
             await ws.send_json({"type": "open", "key": "", "side": "b"})

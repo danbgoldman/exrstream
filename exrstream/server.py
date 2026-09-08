@@ -15,12 +15,18 @@ from aiohttp import web, WSMsgType
 from . import gl
 from .seq import FrameCache, SequenceError, discover
 
-HDR = struct.Struct("<IIfII")         # frameIdx, epoch, ev, flags(1=key), seq
+# frameIdx, epoch, ev, flags(1=key), seq, then the source rectangle this frame
+# actually contains: x, y, side, as fractions of the source. The region travels
+# with the packet for the same reason everything else does -- NVENC hands back
+# the frame pushed three pushes ago, so a packet labelled with the session's
+# current region would paint the wrong rectangle and the picture would slide
+# around under a pan.
+HDR = struct.Struct("<IIfII3f")
 
 # What a delivered packet actually contains. NVENC hands back the frame pushed
 # 3 pushes ago, so this rides along with each push rather than being read off
 # the session at send time.
-Meta = namedtuple("Meta", "frame epoch ev src view token")
+Meta = namedtuple("Meta", "frame epoch ev src view roi token")
 MAX_INFLIGHT = 3            # packets, not sends: a flush emits several at once
 CODEC_STRINGS = {"h264": "avc1.640028", "hevc": "hev1.1.6.L120.90",
                  "av1": "av01.0.08M.08"}
@@ -49,6 +55,9 @@ class Session:
         self.seq_b = self.frames_b = self.grade_b = None
         self.src_b = self.view_b = None
         self.wipe = 0.5
+        # The source rectangle being shown: (x, y, side) as fractions of the
+        # source, (0, 0, 1) being the whole frame.
+        self.roi = (0.0, 0.0, 1.0)
         self.playing, self.dirty, self.jump = False, False, False
         self.flush_next = False
         self.settle_at = 0.0
@@ -93,6 +102,15 @@ class Session:
         takes the same wall-clock time it would in any other player."""
         self.pos = (self.pos + self.src_fps / self.out_fps) % len(self.frames)
         self.frame = int(self.pos)
+
+    def set_roi(self, x, y, side):
+        """Clamp a requested region to something showable: never larger than the
+        source (zooming out past fit would need minification the shader does not
+        do), never smaller than 1/32, and never off the edge."""
+        side = max(1 / 32, min(1.0, float(side)))
+        x = max(0.0, min(1.0 - side, float(x)))
+        y = max(0.0, min(1.0 - side, float(y)))
+        self.roi = (x, y, side)
 
     def seek(self, frame):
         self.frame = frame % len(self.frames)
@@ -183,15 +201,18 @@ class Session:
         self.grade.set_exposure(self.ev)
         img = self.frames[self.frame % len(self.frames)]
         if not (self.compare and self.frames_b):
-            return self.grade(img)
+            self.grade.render(img, roi=self.roi)
+            return self.grade.read()
         split = max(0, min(self.w, int(round(self.wipe * self.w))))
-        self.grade.render(img, scissor=(0, 0, split, self.h))
+        self.grade.render(img, scissor=(0, 0, split, self.h), roi=self.roi)
         # Clamped, not wrapped: past the end of a shorter B, holding its last
         # frame is at least visibly wrong, where wrapping would look plausible
         # and compare the wrong pair.
         b = self.frames_b[min(self.frame, len(self.frames_b) - 1)]
         self.grade_b.set_exposure(self.ev)
-        self.grade_b.render(b, fbo=self.grade.fbo,
+        # Both panes show the same region: comparing two differently-framed
+        # images is not comparing.
+        self.grade_b.render(b, fbo=self.grade.fbo, roi=self.roi,
                             scissor=(split, 0, self.w - split, self.h))
         return self.grade.read()
 
@@ -225,11 +246,12 @@ class Session:
             # Everything that describes the delivered picture travels with the
             # push, so a packet is never labelled with state it does not carry.
             self._pipe.append(Meta(self.frame, self.epoch, self.ev,
-                                   self.src, self.view, tag))
+                                   self.src, self.view, self.roi, tag))
             tag = None                           # only the first push is ours
             for p in self.enc.Encode(self.render_current()):
                 meta = (self._pipe.popleft() if self._pipe else
-                        Meta(self.frame, self.epoch, self.ev, self.src, self.view, None))
+                        Meta(self.frame, self.epoch, self.ev, self.src,
+                             self.view, self.roi, None))
                 out.append((meta, p))
             if not flush or any(m.token is token for m, _ in out):
                 break
@@ -238,8 +260,8 @@ class Session:
     def pack(self, meta, pkt):
         is_key = 1 if pkt.get("picture_type", 0) in (0, 3) else 0
         self.seq_no += 1
-        return (HDR.pack(meta.frame, meta.epoch, meta.ev, is_key, self.seq_no)
-                + bytes(pkt["data"]))
+        return (HDR.pack(meta.frame, meta.epoch, meta.ev, is_key, self.seq_no,
+                         *meta.roi) + bytes(pkt["data"]))
 
     def close(self):
         if self.enc is not None:
@@ -302,7 +324,7 @@ def ready_msg(s, app, first=0, bad=None):
             "src": s.src, "view": s.view, "name": Path(s.seq.key).name,
             "cache_gb": round(app["cache"].bytes / 2**30, 2),
             "bad": bad or [], "note": note_for(s),
-            "compare": s.compare, "wipe": s.wipe,
+            "compare": s.compare, "wipe": s.wipe, "roi": list(s.roi),
             "b_key": s.seq_b.key if s.seq_b else None,
             "b_name": Path(s.seq_b.key).name if s.seq_b else None,
             "b_frames": len(s.frames_b) if s.frames_b else 0,
@@ -475,6 +497,18 @@ async def ws_handler(request):
                     s.flush_next = True
                 except Exception as e:                        # noqa: BLE001
                     await ws.send_json({"type": "error", "msg": f"look: {e}"})
+            elif t == "roi" and s.frames:
+                s.set_roi(m["x"], m["y"], m["s"])
+                s.dirty = True
+                if not s.playing:
+                    # A pinch or a drag fires as fast as the pointer moves, so
+                    # it gets the exposure slider's discipline: rate-limited to
+                    # the frame period, flushed on release, settle as backstop.
+                    if m.get("final"):
+                        s.jump = s.flush_next = True
+                        s.settle_at = 0.0
+                    else:
+                        s.settle_at = time.perf_counter() + 0.12
             elif t == "wipe" and s.frames:
                 s.wipe = max(0.0, min(1.0, float(m["wipe"])))
                 s.dirty = True

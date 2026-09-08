@@ -57,7 +57,7 @@
              flex:1; min-width:0; }
   canvas { display:block; max-width:100%; max-height:78vh; height:auto;
            touch-action:none; }
-  canvas.wipeable { cursor:col-resize; }
+
 
   #tlrow { display:flex; gap:10px; align-items:center; }
   #tl { flex:1; min-width:0; }
@@ -125,6 +125,8 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4l13 8-13 8z" fill="currentColor"/></svg></button>
       <button id="next" disabled title="Forward one frame (→)">
         <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="2.2" height="14" fill="currentColor"/><path d="M8 5l9 7-9 7z" fill="currentColor"/></svg></button>
+      <button id="reset" disabled title="Fit to window (or double-click the image)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="2.2"/></svg></button>
       <button id="last" disabled title="Last frame">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 5l8 7-8 7z" fill="currentColor"/><path d="M9 5l8 7-8 7z" fill="currentColor"/><rect x="17.8" y="5" width="2.2" height="14" fill="currentColor"/></svg></button>
     </div>
@@ -156,14 +158,18 @@ if (!window.VideoDecoder) {
 
 let ws, dec, info = null, ready = null;
 let epoch = 0, pending = null, playing = false, frameIdx = 0, reportedHz = 0;
-let wipe = 0.5, dragging = false;
+let wipe = 0.5, dragging = null;
+// The source rectangle we WANT to see, in fractions of the source. Frames carry
+// the rectangle they actually contain, and the two only agree once the server
+// has caught up -- see paint().
+let view = { x:0, y:0, s:1 }, recv = { x:0, y:0, s:1 };
 // Playback drains a queue on a clock; the slider bypasses it while paused.
 // Painting on arrival is what makes the slider instant and playback judder.
 const q = []; let TARGET_Q = 6, nextPresent = 0, underruns = 0;
 const lat = [], gaps = [], paintGaps = [], rafGaps = [], idleRaf = [];
 let lastArrival = 0, lastPaint = 0, lastRaf = 0, lastStats = 0, painted = 0;
-// Frame index per decoded frame, in decode order. bf=0 means no B-frames, so
-// WebCodecs hands them back in the order they went in.
+// Frame index and source region per decoded frame, in decode order. bf=0 means
+// no B-frames, so WebCodecs hands them back in the order they went in.
 const idxQ = [];
 
 const pct = (a,p) => a.length ? [...a].sort((x,y)=>x-y)[Math.min(a.length-1,Math.floor(a.length*p/100))] : NaN;
@@ -182,7 +188,20 @@ function paint(item) {
     pending = null;
   }
   if (cv.width !== frame.displayWidth) { cv.width = frame.displayWidth; cv.height = frame.displayHeight; }
-  ctx.drawImage(frame, 0, 0);
+  recv = item.roi;
+  // Every paint is (region received -> region wanted). In the steady state they
+  // are equal and this is drawImage(frame, 0, 0); mid-gesture the last frame is
+  // stretched into the new framing, so the picture tracks the pointer and
+  // sharpens when the server catches up, with no snap between the two.
+  const k = frame.displayWidth / recv.s, ky = frame.displayHeight / recv.s;
+  const sx = (view.x - recv.x) * k, sy = (view.y - recv.y) * ky;
+  const sw = view.s * k, sh = view.s * ky;
+  if (sx < 0 || sy < 0 || sx + sw > frame.displayWidth + .5 ||
+      sy + sh > frame.displayHeight + .5) {
+    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, cv.width, cv.height);
+  }
+  ctx.imageSmoothingEnabled = view.s > recv.s;   // magnifying: show the pixels
+  ctx.drawImage(frame, sx, sy, sw, sh, 0, 0, cv.width, cv.height);
   frame.close();
   // The handle is drawn here and not encoded into the stream: it must never
   // become one of the pixels under review, and it costs no bitrate this way.
@@ -251,7 +270,12 @@ function stats() {
       ` · ${ready.src_fps}\u2009fps` +
       (ready.fps === ready.src_fps ? "" :
         ` (streamed ${ready.fps}\u2009fps for ${ready.hz}\u2009Hz)`) +
-      ` · ${ready.src} → ${ready.view} · cache ${ready.cache_gb} GB`
+      ` · ${ready.src} → ${ready.view}` +
+      (view.s >= 1 ? "" :
+        ` · ${(1 / view.s).toFixed(1)}×${Math.abs(view.s - recv.s) < 1e-4 &&
+          Math.abs(view.x - recv.x) < 1e-4 && Math.abs(view.y - recv.y) < 1e-4
+          ? "" : " (catching up)"}`) +
+      ` · cache ${ready.cache_gb} GB`
     : "—";
   if ($("#stats").style.display === "none") return;
   // Rewriting the text node every 250 ms destroys any selection inside it,
@@ -279,7 +303,8 @@ function setupDecoder() {
       // direction.
       if (lastArrival && playing) { gaps.push(now - lastArrival); if (gaps.length > 300) gaps.shift(); }
       lastArrival = now;
-      const item = { f, idx: idxQ.length ? idxQ.shift() : frameIdx };
+      const item = idxQ.length ? idxQ.shift() : { idx: frameIdx, roi: recv };
+      item.f = f;
       if (!playing) { flushQ(); paint(item); stats(); return; }
       q.push(item);
       if (q.length > TARGET_Q + 6) paint(q.shift());
@@ -334,13 +359,14 @@ function connect() {
       $("#posin").max = m.frames; $("#posin").disabled = false;
       $("#total").textContent = String(m.frames);
       setTicks(m.frames);
-      for (const b of ["play","prev","next","first","last"]) $("#"+b).disabled = false;
+      for (const b of ["play","prev","next","first","last","reset"]) $("#"+b).disabled = false;
       $("#fps").value = String(m.src_fps);
       if (m.b_key) {
         $("#seqb").value = m.b_key;
         $("#srcb").value = m.b_src; $("#viewb").value = m.b_view;
       }
       wipe = m.wipe;
+      view = { x:m.roi[0], y:m.roi[1], s:m.roi[2] };
       setCompare(m.compare, m.b_frames, m.frames);
       setupDecoder();
       const bad = (m.bad && m.bad.length)
@@ -377,11 +403,13 @@ function note(text) {
   if (text) $("#warn").textContent = "⚠ " + text;
 }
 
-// `pkt` is the whole packet: 20-byte header then the annex-b bitstream.
+// `pkt` is the whole packet: 32-byte header then the annex-b bitstream.
 function onFrame(pkt) {
   const dv = new DataView(pkt.buffer, pkt.byteOffset, pkt.byteLength);
   const ep = dv.getUint32(4, true), isKey = dv.getUint32(12, true) === 1;
   const seq = dv.getUint32(16, true), idx = dv.getUint32(0, true);
+  const roi = { x: dv.getFloat32(20, true), y: dv.getFloat32(24, true),
+                s: dv.getFloat32(28, true) };
 
   // Ack before decoding, not after: the server sizes its send window from the
   // highest sequence number acked, and a frame the decoder rejects is still a
@@ -391,9 +419,9 @@ function onFrame(pkt) {
   try {
     dec.decode(new EncodedVideoChunk({
       type: isKey ? "key" : "delta", timestamp: ep,
-      data: pkt.subarray(20) }));
+      data: pkt.subarray(32) }));
   } catch (e) { console.error(e); return; }
-  idxQ.push(idx);          // only once the decoder has actually taken it
+  idxQ.push({ idx, roi });     // only once the decoder has actually taken it
 }
 
 $("#seq").onchange = e => { if (e.target.value) send({ type:"open", key:e.target.value }); };
@@ -425,6 +453,7 @@ $("#play").onclick = () => {
 const step = d => { pause(); send({ type:"step", delta:d }); };
 $("#prev").onclick = () => step(-1);
 $("#next").onclick = () => step(1);
+$("#reset").onclick = resetView;
 $("#first").onclick = () => { pause(); send({ type:"seek", frame:0 }); };
 $("#last").onclick = () => { pause(); send({ type:"seek", frame:ready.frames - 1 }); };
 $("#tl").oninput = e => { pause(); send({ type:"seek", frame:+e.target.value }); };
@@ -436,30 +465,72 @@ $("#posin").onchange = e => {
 $("#fps").onchange = e => send({ type:"fps", fps:+e.target.value });
 $("#src").onchange = e => send({ type:"look", src:e.target.value });
 $("#view").onchange = e => send({ type:"look", view:e.target.value });
-// Drag the seam on the picture itself. The canvas is letterboxed by CSS, so
-// the split comes from its rendered box, not its pixel width.
+// The canvas is letterboxed by CSS, so pointer positions come from its rendered
+// box rather than its pixel width.
+const box = () => cv.getBoundingClientRect();
+const fracX = e => (e.clientX - box().left) / box().width;
+
 function setWipe(v, final) {
   wipe = Math.max(0, Math.min(1, v));
   send({ type:"wipe", wipe, final });
 }
-function wipeAt(e) {
-  const r = cv.getBoundingClientRect();
-  return (e.clientX - r.left) / r.width;
+
+// The region we want. Sent optimistically -- the client repaints immediately
+// from whatever it last decoded, and the server catches up a round trip later.
+function setView(x, y, sz, final) {
+  view.s = Math.max(1 / 32, Math.min(1, sz));
+  view.x = Math.max(0, Math.min(1 - view.s, x));
+  view.y = Math.max(0, Math.min(1 - view.s, y));
+  send({ type:"roi", x:view.x, y:view.y, s:view.s, final: !!final });
+  stats();
+}
+function resetView() { setView(0, 0, 1, true); }
+
+// Wheel zooms about the pointer, so the pixel under it stays put -- pinch on a
+// trackpad arrives as a wheel with ctrlKey, and a mouse wheel without.
+cv.addEventListener("wheel", e => {
+  if (!ready) return;
+  e.preventDefault();
+  const r = box();
+  const u = (e.clientX - r.left) / r.width, v = (e.clientY - r.top) / r.height;
+  const at = { x: view.x + u * view.s, y: view.y + v * view.s };
+  const s = view.s * Math.exp(e.deltaY * (e.ctrlKey ? 0.01 : 0.0015));
+  const ns = Math.max(1 / 32, Math.min(1, s));
+  setView(at.x - u * ns, at.y - v * ns, ns, true);
+}, { passive: false });
+
+// A drag near the seam moves it; anywhere else pans. That grab zone is what
+// deleting the wipe slider cost, and it is the standard answer.
+const SEAM_GRAB = 14;                       // px, in rendered canvas space
+function onSeam(e) {
+  if (!ready || !ready.compare) return false;
+  const r = box();
+  return Math.abs((e.clientX - r.left) - wipe * r.width) <= SEAM_GRAB;
 }
 cv.addEventListener("pointerdown", e => {
-  if (!ready || !ready.compare) return;   // no B side, no seam to grab
-  dragging = true;
+  if (!ready) return;
   cv.setPointerCapture(e.pointerId);
-  setWipe(wipeAt(e), false);
+  if (onSeam(e)) { dragging = { kind:"wipe" }; setWipe(fracX(e), false); return; }
+  dragging = { kind:"pan", cx:e.clientX, cy:e.clientY, x:view.x, y:view.y };
 });
-cv.addEventListener("pointermove", e => { if (dragging) setWipe(wipeAt(e), false); });
+cv.addEventListener("pointermove", e => {
+  if (!dragging) { cv.style.cursor = onSeam(e) ? "col-resize" : (view.s < 1 ? "grab" : ""); return; }
+  if (dragging.kind === "wipe") return setWipe(fracX(e), false);
+  const r = box();
+  setView(dragging.x - (e.clientX - dragging.cx) / r.width * view.s,
+          dragging.y - (e.clientY - dragging.cy) / r.height * view.s, view.s, false);
+});
 for (const ev of ["pointerup", "pointercancel"])
   cv.addEventListener(ev, e => {
     if (!dragging) return;
-    dragging = false;
+    const kind = dragging.kind;
+    dragging = null;
     cv.releasePointerCapture(e.pointerId);
-    setWipe(wipeAt(e), true);      // the one event that must flush the encoder
+    // The one event that must flush the encoder, for either gesture.
+    if (kind === "wipe") setWipe(fracX(e), true);
+    else setView(view.x, view.y, view.s, true);
   });
+cv.addEventListener("dblclick", resetView);
 
 // Comparing is having a B side, not a switch. Empty B greys its own row and
 // takes the wipe cursor off the canvas, so the state is visible rather than
@@ -467,7 +538,6 @@ for (const ev of ["pointerup", "pointercancel"])
 function setCompare(on, bFrames, aFrames) {
   $("#ab").classList.toggle("boff", !on);
   for (const id of ["#srcb", "#viewb"]) $(id).disabled = !on;
-  cv.classList.toggle("wipeable", !!on);
   $("#cmpinfo").textContent =
     on && bFrames < aFrames ? `B is ${bFrames}f to A's ${aFrames}f — its last frame is held`
     : on ? "drag the seam on the picture"
